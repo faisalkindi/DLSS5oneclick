@@ -114,6 +114,22 @@ pub fn diagnose(st: &GameStatus) -> Vec<Finding> {
     let d = st.game_dir();
     let mut out = Vec::new();
 
+    // ── a game-shipped HLSL compiler shadowing the system one ──────
+    // The add-on compiles its NR pass at cs_5_1. A d3dcompiler_47.dll that
+    // ships with the game is loaded in preference to System32's, and an old
+    // one does not know that target: "error X3506: unrecognized compiler
+    // target" and no neural rendering, with everything else looking correct.
+    let compiler = d.join("d3dcompiler_47.dll");
+    if compiler.is_file() {
+        let ver = crate::ngx::file_version(&compiler).unwrap_or_else(|| "unknown".into());
+        out.push(warn(format!(
+            "The game ships its own d3dcompiler_47.dll ({ver}), which Windows loads instead of \
+             System32's. If it predates shader model 5.1 the DLSS 5 pass cannot compile \
+             (error X3506). Rename it to d3dcompiler_47.dll.bak and start the game again; \
+             almost every game runs fine on the system copy."
+        )));
+    }
+
     // ── which neural model is installed ────────────────────
     // Two builds of nvngx_dlssnr.dll are in circulation and only the version
     // resource separates them; every failing RTX 50 report so far carries the
@@ -211,6 +227,19 @@ pub fn diagnose(st: &GameStatus) -> Vec<Finding> {
                  without them it has nothing to work with).",
             ));
         }
+    }
+
+    // The compile failure itself, which is unambiguous when it appears.
+    if let Some(line) = rs
+        .lines()
+        .find(|l| l.contains("X3506") || l.contains("unrecognized compiler target"))
+    {
+        out.push(bad(format!(
+            "{} — the HLSL compiler in this process is too old for the DLSS 5 pass. That is \
+             a d3dcompiler_47.dll shipped with the game, loaded in preference to System32's. \
+             Rename it (d3dcompiler_47.dll.bak) and start the game again.",
+            line.trim()
+        )));
     }
 
     // A game with more than one executable (a Vulkan build and a DX11 build,
