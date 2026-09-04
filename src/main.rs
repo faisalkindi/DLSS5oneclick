@@ -12,6 +12,7 @@ mod net;
 mod ngx;
 mod renodx;
 mod reshade_ini;
+mod text;
 mod theme;
 mod update;
 
@@ -223,7 +224,7 @@ fn cli(
                         diagnose::Level::Warn => "warn",
                         diagnose::Level::Bad => "FAIL",
                     };
-                    println!("[{tag}] {}", f.text);
+                    println!("[{tag}] {}", text::tidy(&f.text));
                 }
                 if findings.iter().any(|f| f.level == diagnose::Level::Bad) {
                     1
@@ -250,7 +251,7 @@ fn cli(
                     st.complete()
                 );
                 for p in &st.problems {
-                    println!("  ! {p}");
+                    println!("  ! {}", text::tidy(p));
                 }
                 let names: Vec<&str> = installer::plan_with(&st, engine, with_renodx)
                     .iter()

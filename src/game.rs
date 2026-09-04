@@ -551,8 +551,10 @@ pub fn inspect(exe: &Path) -> Result<GameStatus> {
     // dgVoodoo2, which is exactly how a D3D9 game reaches D3D11 and then the
     // Feeder (verified working on Dead or Alive 5 Last Round, #17).
     if d.join("d3d9.dll").is_file() && !d.join(RESHADE_PROXY).is_file() && !is_dgvoodoo(d) {
-        problems
-            .push("A d3d9.dll proxy is present; DirectX 9 games are not supported here.".into());
+        problems.push(
+            "A d3d9.dll proxy is present that is not dgVoodoo2. DirectX 9 itself is not a dead              end -- DLSS 5 needs a D3D11/12 device, and dgVoodoo2 provides one, which is how a              D3D9 game can work here (#17, #37) -- but this tool cannot install behind another              wrapper. Replace it with dgVoodoo 2.87.3 (MS\\x86\\D3D9.dll plus dgVoodoo.conf,              OutputAPI = bestavailable) and run Install again."
+                .into(),
+        );
     }
     let api = detect_api(exe);
     let is32 = bitness == 32;

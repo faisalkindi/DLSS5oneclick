@@ -8,6 +8,7 @@ use crate::library::{self, Game, Store};
 use crate::logo;
 use crate::net;
 use crate::renodx;
+use crate::text;
 use crate::theme::{self as t};
 use crate::update;
 use eframe::egui::{
@@ -593,9 +594,13 @@ impl App {
             Ok(findings) => {
                 for f in findings {
                     let line = match f.level {
-                        diagnose::Level::Ok => LogLine::Ok(format!("ok: {}", f.text)),
-                        diagnose::Level::Warn => LogLine::Plain(format!("warn: {}", f.text)),
-                        diagnose::Level::Bad => LogLine::Fail(format!("FAIL: {}", f.text)),
+                        diagnose::Level::Ok => LogLine::Ok(format!("ok: {}", text::tidy(&f.text))),
+                        diagnose::Level::Warn => {
+                            LogLine::Plain(format!("warn: {}", text::tidy(&f.text)))
+                        }
+                        diagnose::Level::Bad => {
+                            LogLine::Fail(format!("FAIL: {}", text::tidy(&f.text)))
+                        }
                     };
                     self.log.push(line);
                 }
@@ -2044,7 +2049,11 @@ impl eframe::App for App {
                     });
                 }
                 for p in &problems {
-                    ui.label(RichText::new(p).font(t::plex(12.0)).color(t::DANGER));
+                    ui.label(
+                        RichText::new(text::tidy(p))
+                            .font(t::plex(12.0))
+                            .color(t::DANGER),
+                    );
                 }
                 if let Some(ac) = ok_status.as_ref().and_then(|s| s.anticheat) {
                     let mut on = game::ignore_anticheat();
