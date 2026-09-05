@@ -221,6 +221,14 @@ fn step_opti(
             parts.join("/")
         };
         let dest = d.join(out_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        // A refresh must not overwrite the settings file. It carries the user's
+        // choices -- upscaler, frame generation, LoadReshade -- and replacing it
+        // silently turns them all back to auto, which is how a working RenoDX
+        // install stopped loading ReShade after a routine update.
+        if fname.eq_ignore_ascii_case(OPTI_INI) && dest.is_file() {
+            installed.push(out_rel);
+            continue;
+        }
         net::extract_member(&mut zip, &member, &dest)?;
         installed.push(out_rel);
     }

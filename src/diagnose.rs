@@ -269,14 +269,34 @@ pub fn diagnose(st: &GameStatus) -> Vec<Finding> {
             .lines()
             .find(|l| l.contains("D3D12CreateDevice failed 0x887E0003"))
         {
+            // Where the redist actually is decides what the user can do. Unreal
+            // puts it in a D3D12 subfolder; a Unity player declares the exe's own
+            // folder, so renaming a "D3D12 folder" that was never there changes
+            // nothing and reads as a dead end (dlss5-bridge#24).
+            let where_ = match game::has_agility_redist(d) {
+                Some(p) => {
+                    let ver = crate::ngx::file_version(&p).unwrap_or_else(|| "unknown".into());
+                    format!(
+                        "The copy in force here is {} ({ver}). Rename it and start the game \
+                         again: it falls back to the Windows runtime, which every device in \
+                         the process can match. If the game will not start without it, verify \
+                         the game files instead -- a D3D12Core.dll replaced or truncated by \
+                         another tool gives exactly this error.",
+                        p.display()
+                    )
+                }
+                None => "No D3D12Core.dll is next to the exe or in a D3D12 folder here, so the \
+                         declaration points somewhere else or the file is missing outright. \
+                         Verify the game files."
+                    .into(),
+            };
             out.push(bad(format!(
-                "{} — 0x887E0003 is D3D12_ERROR_INVALID_REDIST: this game ships a DirectX 12 \
-                 Agility SDK (a D3D12\\D3D12Core.dll beside the exe) and every D3D12 device in \
-                 the process must match it, which the bridge's private device cannot. Not \
-                 something this tool sets. Worth trying: rename the game's D3D12 folder so it \
-                 falls back to the Windows runtime, and report the log to \
-                 github.com/NIGos/dlss5-bridge.",
-                line.trim()
+                "{} — 0x887E0003 is D3D12_ERROR_INVALID_REDIST: the executable declares its own \
+                 DirectX 12 Agility SDK (D3D12SDKVersion/D3D12SDKPath exports), and until that \
+                 declaration is satisfied no D3D12 device can be created in this process at \
+                 all -- not the bridge's, not the game's. Not something this tool sets. {}",
+                line.trim(),
+                where_
             )));
         } else if bl.contains("frames:") && !bl.contains("session failed") {
             out.push(ok(

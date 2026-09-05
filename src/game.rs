@@ -226,12 +226,26 @@ fn classify_imports(imports: &[String]) -> Api {
     }
 }
 
+/// True when the game carries its own DirectX 12 Agility SDK runtime.
+/// Unreal puts it in a `D3D12` subfolder; Unity players declare the exe's own
+/// folder, so the file sits directly beside the exe. Both count, and the
+/// second layout is the one that produced a 0x887E0003 nobody could find
+/// (dlss5-bridge#24).
+pub fn has_agility_redist(dir: &Path) -> Option<PathBuf> {
+    [
+        dir.join("D3D12").join("D3D12Core.dll"),
+        dir.join("D3D12Core.dll"),
+    ]
+    .into_iter()
+    .find(|p| p.is_file())
+}
+
 pub fn detect_api(exe: &Path) -> Api {
     use classify_imports as classify;
     let api = classify(&pe_imports(exe));
     let agility_sdk = exe
         .parent()
-        .is_some_and(|d| d.join("D3D12").join("D3D12Core.dll").is_file());
+        .is_some_and(|d| has_agility_redist(d).is_some());
     if api == Api::Dx12 || (api == Api::Dx11 && agility_sdk) {
         // The DirectX 12 Agility SDK redist ships only with D3D12 renderers;
         // RE Engine exes import d3d11.dll statically and create D3D12 at runtime.
@@ -823,6 +837,27 @@ pub mod testutil {
 
 #[cfg(test)]
 mod tests {
+
+    /// Unreal keeps its Agility runtime in a D3D12 subfolder, Unity players put
+    /// it directly beside the exe. Missing the second layout is what made a
+    /// 0x887E0003 look unexplainable (dlss5-bridge#24).
+    #[test]
+    fn agility_redist_found_in_both_layouts() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path();
+        assert!(has_agility_redist(d).is_none());
+
+        fs::write(d.join("D3D12Core.dll"), b"x").unwrap();
+        assert_eq!(has_agility_redist(d), Some(d.join("D3D12Core.dll")));
+
+        fs::create_dir(d.join("D3D12")).unwrap();
+        fs::write(d.join("D3D12").join("D3D12Core.dll"), b"x").unwrap();
+        // The subfolder wins when a game somehow carries both.
+        assert_eq!(
+            has_agility_redist(d),
+            Some(d.join("D3D12").join("D3D12Core.dll"))
+        );
+    }
     use super::testutil::*;
     use super::*;
 
