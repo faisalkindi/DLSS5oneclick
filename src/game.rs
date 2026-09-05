@@ -702,8 +702,7 @@ pub fn find_game_exes(dir: &Path) -> Vec<PathBuf> {
         }
     };
     push_dir(dir);
-    // One and two levels down (bin/x64, bin/x64_dx12, Game/Binaries/Win64 ...), skipping
-    // engine/content trees that never hold the launch exe.
+    // Subfolders that never hold a launch exe, skipped at every level.
     let skip = |p: &Path| {
         let n = p
             .file_name()
@@ -723,28 +722,26 @@ pub fn find_game_exes(dir: &Path) -> Vec<PathBuf> {
                 | "redistributables"
         ) || n.ends_with("_data")
     };
-    if let Ok(rd1) = fs::read_dir(dir) {
-        for d1 in rd1
+    // Down to four levels, which is where games actually put the launch exe:
+    // bin/x64, Game/Binaries/Win64, and ph_ft/work/bin/x64 (Dying Light: The
+    // Beast, #43). Engine and content trees are skipped at every level.
+    fn walk(d: &Path, depth: u8, skip: &dyn Fn(&Path) -> bool, out: &mut dyn FnMut(&Path)) {
+        if depth == 0 {
+            return;
+        }
+        let Ok(rd) = fs::read_dir(d) else {
+            return;
+        };
+        for sub in rd
             .flatten()
             .map(|e| e.path())
             .filter(|p| p.is_dir() && !skip(p))
         {
-            push_dir(&d1);
-            if let Ok(rd2) = fs::read_dir(&d1) {
-                for d2 in rd2
-                    .flatten()
-                    .map(|e| e.path())
-                    .filter(|p| p.is_dir() && !skip(p))
-                {
-                    push_dir(&d2);
-                    let win64 = d2.join("Win64");
-                    if win64.is_dir() {
-                        push_dir(&win64);
-                    }
-                }
-            }
+            out(&sub);
+            walk(&sub, depth - 1, skip, out);
         }
     }
+    walk(dir, 4, &skip, &mut push_dir);
     // The Engine tree is skipped above because it is full of helper exes, but
     // Satisfactory keeps its shipping exe in exactly one place inside it (#29).
     let eng = dir.join("Engine").join("Binaries").join("Win64");
@@ -1033,6 +1030,30 @@ mod tests {
         assert!(!found
             .iter()
             .any(|p| p.to_string_lossy().contains("Redistributables")));
+    }
+
+    #[test]
+    fn find_game_exes_finds_exe_four_levels_down() {
+        // Dying Light: The Beast keeps its exe at ph_ft\work\bin\x64 (#43);
+        // two levels of search reported "no 64-bit game executable found".
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path().join("Dying Light The Beast");
+        let deep = d.join("ph_ft").join("work").join("bin").join("x64");
+        fs::create_dir_all(&deep).unwrap();
+        let exe = deep.join("DyingLightGame_TheBeast_x64_rwdi.exe");
+        make_pe(&exe, PE_X64);
+        assert_eq!(find_game_exes(&d), vec![exe]);
+
+        // Five levels down is still out of reach, and content trees stay skipped.
+        let t2 = tempfile::tempdir().unwrap();
+        let d2 = t2.path().join("Game");
+        let too_deep = d2.join("a").join("b").join("c").join("d").join("e");
+        fs::create_dir_all(&too_deep).unwrap();
+        make_pe(&too_deep.join("Game.exe"), PE_X64);
+        let content = d2.join("Content").join("bin");
+        fs::create_dir_all(&content).unwrap();
+        make_pe(&content.join("Game.exe"), PE_X64);
+        assert!(find_game_exes(&d2).is_empty());
     }
 
     #[test]
