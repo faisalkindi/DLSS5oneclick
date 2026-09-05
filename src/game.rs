@@ -117,6 +117,10 @@ pub enum Api {
     Dx10,
     Dx11,
     Dx12,
+    /// Imports `vulkan-1.dll` and no Direct3D. ReShade reaches a Vulkan game
+    /// through a registered Vulkan layer, not through a `dxgi.dll` beside the
+    /// exe, so this install has nothing to load (#6, Detroit: Become Human).
+    Vulkan,
     /// Neither d3d11.dll nor d3d12.dll is a static import (loaded at runtime, or DX9/Vulkan).
     Unknown,
 }
@@ -127,6 +131,7 @@ impl Api {
             Api::Dx10 => "DX10",
             Api::Dx11 => "DX11",
             Api::Dx12 => "DX12",
+            Api::Vulkan => "Vulkan",
             Api::Unknown => "API unknown, assuming DX12",
         }
     }
@@ -214,6 +219,8 @@ fn classify_imports(imports: &[String]) -> Api {
         Api::Dx11
     } else if has("d3d10_1.dll") || has("d3d10.dll") {
         Api::Dx10
+    } else if has("vulkan-1.dll") {
+        Api::Vulkan
     } else {
         Api::Unknown
     }
@@ -265,7 +272,7 @@ pub fn detect_api(exe: &Path) -> Api {
         match classify(&pe_imports(&dll)) {
             Api::Dx12 => return Api::Dx12,
             Api::Dx11 => seen_dx11 = true,
-            Api::Dx10 | Api::Unknown => {}
+            Api::Dx10 | Api::Vulkan | Api::Unknown => {}
         }
     }
     if seen_dx11 {
@@ -557,6 +564,16 @@ pub fn inspect(exe: &Path) -> Result<GameStatus> {
         );
     }
     let api = detect_api(exe);
+    if api == Api::Vulkan {
+        problems.push(
+            "This is a Vulkan game. ReShade reaches Vulkan through a registered Vulkan \
+             layer, not through the dxgi.dll this tool installs, so nothing here would \
+             ever load -- no ReShade overlay and no log. Install ReShade with its own \
+             setup and tick the Vulkan option, then use DLSS5-Feeder's Vulkan layer \
+             (layer-x64 in its zip). This tool covers Direct3D 10, 11 and 12 only."
+                .into(),
+        );
+    }
     let is32 = bitness == 32;
     if is32 && api == Api::Dx12 {
         problems.push(
@@ -897,6 +914,24 @@ mod tests {
         // A ReShade build without the author's name is still ReShade.
         assert!(is_reshade_image(b"ReShade effect runtime"));
         assert!(!is_reshade_image(b"some other dxgi wrapper"));
+    }
+
+    /// A Vulkan-only game imports vulkan-1.dll and no Direct3D; the dxgi.dll
+    /// proxy can never load in one, so it has to be named rather than
+    /// reported as "API unknown, assuming DX12" (#6).
+    #[test]
+    fn classify_imports_reads_vulkan() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(classify_imports(&s(&["vulkan-1.dll"])), Api::Vulkan);
+        // A game offering both still takes the Direct3D path.
+        assert_eq!(
+            classify_imports(&s(&["vulkan-1.dll", "d3d12.dll"])),
+            Api::Dx12
+        );
+        assert_eq!(
+            classify_imports(&s(&["vulkan-1.dll", "d3d11.dll"])),
+            Api::Dx11
+        );
     }
 
     #[test]

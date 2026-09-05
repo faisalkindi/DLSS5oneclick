@@ -368,6 +368,7 @@ impl App {
                     .ok()
                     .map(|st| GameMeta {
                         api: match st.api {
+                            game::Api::Vulkan => "Vulkan",
                             game::Api::Dx10 => "DirectX 10",
                             game::Api::Dx11 => "DirectX 11",
                             game::Api::Dx12 => "DirectX 12",
@@ -511,6 +512,7 @@ impl App {
                 .ok()
                 .map(|st| GameMeta {
                     api: match st.api {
+                        game::Api::Vulkan => "Vulkan",
                         game::Api::Dx10 => "DirectX 10",
                         game::Api::Dx11 => "DirectX 11",
                         game::Api::Dx12 => "DirectX 12",
