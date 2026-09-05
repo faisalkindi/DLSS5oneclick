@@ -216,9 +216,111 @@ pub fn download(
     label: &str,
     progress: Progress,
 ) -> Result<()> {
+    // A release asset URL names its tag, so the bytes behind it never change:
+    // the 165 MB model and the OptiScaler zip were being fetched again for
+    // every game somebody set up (#42). Reuse what is already on disk.
+    if let Some(cached) = cache_path(url) {
+        if cached.is_file() {
+            if let Some(p) = dest.parent() {
+                fs::create_dir_all(p)?;
+            }
+            if fs::copy(&cached, dest).is_ok() {
+                progress(100, &format!("{label} (cached)"));
+                return Ok(());
+            }
+            // A cache entry that cannot be copied is not worth keeping.
+            let _ = fs::remove_file(&cached);
+        }
+    }
     with_retry(progress, label, || {
         download_once(client, url, dest, label, progress)
-    })
+    })?;
+    if let Some(cached) = cache_path(url) {
+        if let Some(p) = cached.parent() {
+            let _ = fs::create_dir_all(p);
+            // Copying first and renaming keeps a half-written entry from ever
+            // being read as a complete one.
+            let tmp = cached.with_extension("part");
+            if fs::copy(dest, &tmp).is_ok() && fs::rename(&tmp, &cached).is_err() {
+                let _ = fs::remove_file(&tmp);
+            }
+            prune_cache(p);
+        }
+    }
+    Ok(())
+}
+
+/// Where a downloaded file is kept for next time.
+pub fn cache_dir() -> std::path::PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("dlss5oneclick")
+        .join("downloads")
+}
+
+/// The cache file for a URL, or `None` for a URL whose contents can change
+/// under the same address -- `/releases/latest/download/...` is a moving
+/// target, and caching it would pin everybody to whatever shipped first.
+fn cache_path(url: &str) -> Option<std::path::PathBuf> {
+    if !url.starts_with("https://") || url.contains("/latest/download/") {
+        return None;
+    }
+    let name = url.rsplit('/').next().filter(|n| !n.is_empty())?;
+    if name.len() > 80 || name.contains(|c: char| !c.is_ascii_graphic()) {
+        return None;
+    }
+    // FNV-1a over the whole URL: the file name alone is not unique across
+    // tags, and this needs no dependency.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in url.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    Some(cache_dir().join(format!("{h:016x}-{safe}")))
+}
+
+/// Cap the cache so a year of upstream releases cannot fill a disk: oldest
+/// entries go first, by last-modified time.
+const CACHE_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
+
+fn prune_cache(dir: &Path) {
+    let Ok(rd) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(std::time::SystemTime, u64, std::path::PathBuf)> = rd
+        .flatten()
+        .filter_map(|e| {
+            let m = e.metadata().ok()?;
+            if !m.is_file() {
+                return None;
+            }
+            Some((m.modified().ok()?, m.len(), e.path()))
+        })
+        .collect();
+    let mut total: u64 = files.iter().map(|(_, len, _)| *len).sum();
+    if total <= CACHE_LIMIT {
+        return;
+    }
+    files.sort_by_key(|(when, _, _)| *when);
+    for (_, len, path) in files {
+        if total <= CACHE_LIMIT {
+            break;
+        }
+        if fs::remove_file(&path).is_ok() {
+            total = total.saturating_sub(len);
+        }
+    }
 }
 
 /// One attempt: stream to a `.part` file, reporting percent + KB/MB downloaded.
@@ -310,6 +412,31 @@ pub fn file_name(member: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+
+    /// The cache key has to separate two releases of the same file name, and
+    /// has to refuse a URL whose contents move under it (#42).
+    #[test]
+    fn cache_path_is_per_url_and_skips_moving_targets() {
+        let a = super::cache_path("https://github.com/o/r/releases/download/v1.4.10/x.addon64");
+        let b = super::cache_path("https://github.com/o/r/releases/download/v1.4.11/x.addon64");
+        assert!(a.is_some() && b.is_some());
+        assert_ne!(a, b, "two tags must not share one cache entry");
+        assert!(a
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with("-x.addon64"));
+
+        // Moves whenever upstream publishes: never cached.
+        assert!(
+            super::cache_path("https://github.com/o/r/releases/latest/download/x.zip").is_none()
+        );
+        // Not https, or no file name at the end.
+        assert!(super::cache_path("http://example.com/x.zip").is_none());
+        assert!(super::cache_path("https://example.com/dir/").is_none());
+    }
+
     use super::*;
     use std::cell::Cell;
 
