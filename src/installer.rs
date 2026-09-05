@@ -235,6 +235,15 @@ fn step_opti(
     if !installed.iter().any(|p| p == game::RESHADE_PROXY) {
         bail!("the OptiScaler release had no OptiScaler.dll — layout changed upstream");
     }
+    // OptiScaler ships DLSS Neural Rendering off, and its overlay toggle lives
+    // only in memory unless the user finds the Save button -- so the whole
+    // point of this install had to be switched back on at every launch.
+    let ini = d.join(OPTI_INI);
+    if let Ok(text) = fs::read_to_string(&ini) {
+        if let Some(patched) = set_dlss_nr_enabled(&text) {
+            fs::write(&ini, patched)?;
+        }
+    }
     let header = latest
         .as_deref()
         .map(|t| format!("# tag {t}\n"))
@@ -457,6 +466,39 @@ pub fn set_load_reshade(ini: &str) -> Option<String> {
             out.push('\n');
         }
         out.push_str("\n[Plugins]\nLoadReshade=true\n");
+        changed = true;
+    }
+    changed.then_some(out)
+}
+
+/// `[DlssNr] Enabled=true` in OptiScaler.ini; `None` when it already says so.
+/// Section-scoped: `Enabled` appears under half a dozen headings in that file.
+pub fn set_dlss_nr_enabled(ini: &str) -> Option<String> {
+    let mut out = String::with_capacity(ini.len() + 32);
+    let mut in_section = false;
+    let mut seen = false;
+    let mut changed = false;
+    for line in ini.split_inclusive('\n') {
+        let raw = line.trim_end_matches(['\r', '\n']);
+        let t = raw.trim();
+        if t.starts_with('[') {
+            in_section = t.eq_ignore_ascii_case("[DlssNr]");
+        } else if in_section && t.split('=').next().unwrap_or("").trim() == "Enabled" {
+            seen = true;
+            if t.split('=').nth(1).map(str::trim) != Some("true") {
+                out.push_str("Enabled=true");
+                out.push_str(&line[raw.len()..]);
+                changed = true;
+                continue;
+            }
+        }
+        out.push_str(line);
+    }
+    if !seen {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("\n[DlssNr]\nEnabled=true\n");
         changed = true;
     }
     changed.then_some(out)
@@ -1638,6 +1680,22 @@ mod tests {
                 "RenoDX HDR mod for this game",
                 "GPU preference"
             ]
+        );
+    }
+
+    #[test]
+    fn dlss_nr_enabled_is_section_scoped() {
+        // "Enabled" also lives under other headings; only DlssNr's may move.
+        let ini = "[OptiFG]\nEnabled=auto\n\n[DlssNr]\n; comment\nEnabled=auto\n";
+        assert_eq!(
+            set_dlss_nr_enabled(ini).unwrap(),
+            "[OptiFG]\nEnabled=auto\n\n[DlssNr]\n; comment\nEnabled=true\n"
+        );
+        assert!(set_dlss_nr_enabled("[DlssNr]\nEnabled=true\n").is_none());
+        // No section at all: append one.
+        assert_eq!(
+            set_dlss_nr_enabled("[OptiFG]\nEnabled=auto\n").unwrap(),
+            "[OptiFG]\nEnabled=auto\n\n[DlssNr]\nEnabled=true\n"
         );
     }
 

@@ -1,6 +1,6 @@
 [package]
 name = "dlss5oneclick"
-version = "0.11.9"
+version = "0.11.10"
 edition = "2021"
 description = "One-click DLSS 5 neural rendering setup for DX11/DX12 games that ship without DLSS"
 license = "MIT"
