@@ -582,9 +582,13 @@ pub fn inspect(exe: &Path) -> Result<GameStatus> {
         problems.push(
             "This is a Vulkan game. ReShade reaches Vulkan through a registered Vulkan \
              layer, not through the dxgi.dll this tool installs, so nothing here would \
-             ever load -- no ReShade overlay and no log. Install ReShade with its own \
-             setup and tick the Vulkan option, then use DLSS5-Feeder's Vulkan layer \
-             (layer-x64 in its zip). This tool covers Direct3D 10, 11 and 12 only."
+             ever load -- no ReShade overlay and no log. DLSS5-Feeder does cover Vulkan; \
+             the part this tool cannot do is the ReShade side. Run ReShade's own setup, \
+             point it at this exe and choose Vulkan, set AddonPath to the game folder under [ADDON] in \
+             ReShade.ini, then install the Feeder files as for a 64-bit game. If \
+             dlss5-feed.log then says the interop entry points are missing, start the \
+             game through run-with-feed-layer.bat in the Feeder repo layer folder. \
+             This tool covers Direct3D 10, 11 and 12 only."
                 .into(),
         );
     }
