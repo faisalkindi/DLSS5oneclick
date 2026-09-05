@@ -20,6 +20,19 @@ use std::io::Write;
 use std::path::PathBuf;
 
 /// `dlss5oneclick <GAME.exe | game folder> [--remove | --remove-all | --check | --diagnose | --engine=opti | --renodx | --ignore-anticheat | --mode=feeder|native] | --update` runs headless; no args opens the GUI.
+/// Read by the NVIDIA and AMD drivers from this exe's export table to choose
+/// the discrete GPU for the whole process. Exported by the linker flags in
+/// build.rs; the values themselves are what the drivers read (#32).
+#[cfg(windows)]
+#[no_mangle]
+#[used]
+pub static NvOptimusEnablement: u32 = 1;
+
+#[cfg(windows)]
+#[no_mangle]
+#[used]
+pub static AmdPowerXpressRequestHighPerformance: u32 = 1;
+
 fn main() {
     install_panic_handler();
     update::cleanup_old();
