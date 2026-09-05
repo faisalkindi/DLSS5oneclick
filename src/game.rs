@@ -502,6 +502,22 @@ impl GameStatus {
     pub fn game_dir(&self) -> &Path {
         self.exe.parent().expect("exe has a parent")
     }
+    /// Why the ReShade engine cannot reach this game, when that is the case.
+    /// A Vulkan game has no `dxgi.dll` to hook, so ReShade must be installed as
+    /// a Vulkan layer by its own setup -- but OptiScaler reaches Vulkan games
+    /// perfectly well, so this refuses one engine, not the game (#46,
+    /// Indiana Jones and the Great Circle, which worked until 0.11.8).
+    pub fn reshade_engine_problem(&self) -> Option<String> {
+        (self.api == Api::Vulkan).then(|| {
+            "This is a Vulkan game, so the ReShade engine cannot reach it: ReShade hooks \
+             Vulkan through a registered layer, not through the dxgi.dll installed beside \
+             the exe, and nothing here would ever load. Use the OptiScaler engine, which \
+             does cover Vulkan. To use ReShade anyway, run its own setup, point it at this \
+             exe and choose Vulkan, then follow DLSS5-Feeder's Vulkan instructions."
+                .to_owned()
+        })
+    }
+
     pub fn is32(&self) -> bool {
         self.bitness == 32
     }
@@ -578,20 +594,6 @@ pub fn inspect(exe: &Path) -> Result<GameStatus> {
         );
     }
     let api = detect_api(exe);
-    if api == Api::Vulkan {
-        problems.push(
-            "This is a Vulkan game. ReShade reaches Vulkan through a registered Vulkan \
-             layer, not through the dxgi.dll this tool installs, so nothing here would \
-             ever load -- no ReShade overlay and no log. DLSS5-Feeder does cover Vulkan; \
-             the part this tool cannot do is the ReShade side. Run ReShade's own setup, \
-             point it at this exe and choose Vulkan, set AddonPath to the game folder under [ADDON] in \
-             ReShade.ini, then install the Feeder files as for a 64-bit game. If \
-             dlss5-feed.log then says the interop entry points are missing, start the \
-             game through run-with-feed-layer.bat in the Feeder repo layer folder. \
-             This tool covers Direct3D 10, 11 and 12 only."
-                .into(),
-        );
-    }
     let is32 = bitness == 32;
     if is32 && api == Api::Dx12 {
         problems.push(

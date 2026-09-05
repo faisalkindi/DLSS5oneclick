@@ -1587,12 +1587,21 @@ impl eframe::App for App {
                 .request_repaint_after(std::time::Duration::from_millis(100));
         }
 
-        let (ok_status, problems, complete) = match &self.status {
+        let (ok_status, mut problems, complete) = match &self.status {
             Some(Ok(s)) => (Some(s.clone()), s.problems.clone(), s.complete()),
             Some(Err(e)) => (None, vec![e.clone()], false),
             None => (None, vec![], false),
         };
 
+        // A Vulkan game blocks the ReShade engine only; OptiScaler reaches it (#46).
+        if self.engine == Engine::ReShade {
+            if let Some(p) = ok_status
+                .as_ref()
+                .and_then(game::GameStatus::reshade_engine_problem)
+            {
+                problems.push(p);
+            }
+        }
         self.pump_library(ui.ctx());
         if self.scanning || self.poster_rx.is_some() {
             ui.ctx()
