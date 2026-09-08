@@ -21,6 +21,11 @@ pub struct FeederKnobs {
     pub light_stab: bool,
     pub light_stab_strength: f32,
     pub engine_velocity: bool,
+    /// D3D11 SceneColor snap → SLOT_COLOR (Feeder); off by default.
+    pub early_color: bool,
+    pub early_color_cand: i32,
+    /// D3D11 async feed (~1 frame display lag); off by default.
+    pub async_feed: bool,
     pub evaluate_stride: i32,
     pub log_detail: i32,
     pub appearance_mask: bool,
@@ -46,6 +51,9 @@ impl Default for FeederKnobs {
             light_stab: false,
             light_stab_strength: 0.35,
             engine_velocity: true,
+            early_color: false,
+            early_color_cand: -1,
+            async_feed: false,
             evaluate_stride: 1,
             log_detail: 1,
             appearance_mask: true,
@@ -62,7 +70,6 @@ impl Default for FeederKnobs {
 
 impl FeederKnobs {
     /// Axes used for nearest-neighbor FPS lookup (normalized 0..1 later).
-    #[allow(dead_code)]
     pub fn knobs_vec(&self) -> [f32; 6] {
         [
             self.work_resolution as f32 / 100.0,
@@ -151,6 +158,9 @@ pub fn load(game_dir: &Path) -> Result<FeederKnobs> {
     k.light_stab = get_i(&kv, "light_stab", 0) != 0;
     k.light_stab_strength = get_f(&kv, "light_stab_strength", k.light_stab_strength);
     k.engine_velocity = get_i(&kv, "engine_velocity", 1) != 0;
+    k.early_color = get_i(&kv, "early_color", 0) != 0;
+    k.early_color_cand = get_i(&kv, "early_color_cand", -1);
+    k.async_feed = get_i(&kv, "async_feed", 0) != 0;
     k.evaluate_stride = get_i(&kv, "evaluate_stride", k.evaluate_stride).clamp(1, 4);
     k.log_detail = get_i(&kv, "log_detail", k.log_detail);
     k.auto_profile = get_s(&kv, "auto_profile");
@@ -220,6 +230,21 @@ pub fn save(game_dir: &Path, k: &FeederKnobs) -> Result<()> {
         &mut lines,
         "engine_velocity",
         (k.engine_velocity as i32).to_string(),
+    );
+    set_line(
+        &mut lines,
+        "early_color",
+        (k.early_color as i32).to_string(),
+    );
+    set_line(
+        &mut lines,
+        "early_color_cand",
+        k.early_color_cand.to_string(),
+    );
+    set_line(
+        &mut lines,
+        "async_feed",
+        (k.async_feed as i32).to_string(),
     );
     set_line(
         &mut lines,

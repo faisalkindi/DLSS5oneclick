@@ -8,6 +8,7 @@ use crate::installer::{self, Engine, StepState};
 use crate::library::{self, Game, Store};
 use crate::logo;
 use crate::net;
+use crate::perf;
 use crate::quality_preset::QualityChoice;
 use crate::renodx;
 use crate::settings::Settings;
@@ -103,6 +104,8 @@ pub struct App {
     knobs: Option<FeederKnobs>,
     knobs_err: Option<String>,
     knobs_dirty: bool,
+    perf_samples: Vec<perf::PerfSample>,
+    expected_fps_label: String,
     /// Collapsed install log shows a one-line summary.
     log_expanded: bool,
     /// First-run tip dismissed (also persisted in eframe storage / settings).
@@ -156,10 +159,17 @@ struct GameMeta {
     wrong_folder: Option<String>,
     /// Canonical Shipping (or best) exe.
     exe: PathBuf,
+    /// Feeder early_color=1 in cfg (seed/active request); in-game may still fallback Present.
+    early_color: bool,
+    /// Feeder async_feed=1 — display lag ~1 frame.
+    async_feed: bool,
 }
 
 fn meta_from_status(st: &GameStatus, latest: &installer::Latest) -> GameMeta {
     let dir = st.game_dir();
+    let knobs = feeder_cfg::load(dir).ok();
+    let early_color = knobs.as_ref().map(|k| k.early_color).unwrap_or(false);
+    let async_feed = knobs.as_ref().map(|k| k.async_feed).unwrap_or(false);
     GameMeta {
         api: match st.api {
             game::Api::Vulkan => "Vulkan",
@@ -188,6 +198,8 @@ fn meta_from_status(st: &GameStatus, latest: &installer::Latest) -> GameMeta {
         shaders_missing: game::shaders_missing(dir),
         wrong_folder: game::install_folder_mismatch(&st.exe),
         exe: st.exe.clone(),
+        early_color,
+        async_feed,
     }
 }
 
@@ -252,6 +264,8 @@ impl App {
             knobs: None,
             knobs_err: None,
             knobs_dirty: false,
+            perf_samples: Vec::new(),
+            expected_fps_label: String::new(),
             log_expanded: true,
             tip_dismissed: cc
                 .storage
@@ -318,6 +332,8 @@ impl App {
         self.knobs = None;
         self.knobs_err = None;
         self.knobs_dirty = false;
+        self.perf_samples.clear();
+        self.expected_fps_label.clear();
         let Some(exe) = self.resolved_exe.clone() else {
             return;
         };
@@ -326,10 +342,34 @@ impl App {
         };
         match feeder_cfg::load(&dir) {
             Ok(k) => {
+                self.perf_samples = perf::load(&dir);
+                self.refresh_expected_fps(&k);
                 self.knobs = Some(k);
             }
             Err(e) => self.knobs_err = Some(format!("{e:#}")),
         }
+    }
+
+    fn refresh_expected_fps(&mut self, k: &FeederKnobs) {
+        self.expected_fps_label = match perf::expected_fps(&self.perf_samples, k) {
+            Some(e) => format!(
+                "≈ {:.0} FPS expected ({:.0}% conf, {} neigh)",
+                e.fps,
+                e.confidence * 100.0,
+                e.neighbours
+            ),
+            None => {
+                if self.perf_samples.is_empty() {
+                    "need in-game session (no dlss5-perf.jsonl yet)".into()
+                } else {
+                    format!(
+                        "need in-game session ({} samples, want ≥{})",
+                        self.perf_samples.len(),
+                        perf::MIN_SAMPLES
+                    )
+                }
+            }
+        };
     }
 
     fn apply_settings_to_game(&mut self) {
@@ -1482,8 +1522,29 @@ impl App {
             for (on, label) in [
                 (m.has_dlss, dlss_label),
                 (m.addon || m.installed, m.engine_path),
+                (
+                    m.early_color,
+                    if m.early_color {
+                        "Early color"
+                    } else if m.addon || m.installed {
+                        "Present"
+                    } else {
+                        ""
+                    },
+                ),
+                (
+                    m.async_feed,
+                    if m.async_feed {
+                        "Async ~1f"
+                    } else {
+                        ""
+                    },
+                ),
                 (m.ready && m.stale.is_empty(), ready_label),
             ] {
+                if label.is_empty() {
+                    continue;
+                }
                 let cy = band.center().y;
                 p.circle_filled(
                     egui::pos2(x + 3.0, cy),
@@ -1886,6 +1947,34 @@ impl App {
                 .checkbox(&mut k.engine_velocity, "engine_velocity")
                 .changed();
             changed |= ui
+                .checkbox(
+                    &mut k.early_color,
+                    "early_color (D3D11 SceneColor; off = Present)",
+                )
+                .changed();
+            changed |= ui
+                .checkbox(
+                    &mut k.async_feed,
+                    "async_feed (D3D11; ~1 frame display lag; off = sync)",
+                )
+                .changed();
+            ui.label(
+                RichText::new(if k.early_color {
+                    "Color path: Early color active (Feeder confirms snap in-game; else fallback Present)"
+                } else {
+                    "Color path: fallback Present"
+                })
+                .font(t::plex(11.0))
+                .color(t::TEXT_SOFT),
+            );
+            if k.async_feed {
+                ui.label(
+                    RichText::new("Async feed ON · display lag ~1 frame (not an FPS delay)")
+                        .font(t::plex(11.0))
+                        .color(t::TEXT_SOFT),
+                );
+            }
+            changed |= ui
                 .add(egui::Slider::new(&mut k.evaluate_stride, 1..=4).text("evaluate_stride"))
                 .changed();
             changed |= ui
@@ -1909,7 +1998,64 @@ impl App {
         }
         if changed {
             self.knobs_dirty = true;
+            if let Some(k) = self.knobs.clone() {
+                self.refresh_expected_fps(&k);
+            }
         }
+        ui.label(
+            RichText::new(self.expected_fps_label.clone())
+                .font(t::plex(12.0))
+                .color(t::ACCENT),
+        );
+        if !self.perf_samples.is_empty() {
+            ui.label(
+                RichText::new(format!(
+                    "{} perf samples in dlss5-perf.jsonl",
+                    self.perf_samples.len()
+                ))
+                .font(t::plex(11.0))
+                .color(t::TEXT_DIM),
+            );
+            let recent: Vec<f32> = self
+                .perf_samples
+                .iter()
+                .rev()
+                .take(40)
+                .map(|s| s.fps)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            if recent.len() >= 2 {
+                let (rect, _) = ui.allocate_exact_size(
+                    Vec2::new(ui.available_width().min(420.0), 36.0),
+                    egui::Sense::hover(),
+                );
+                let min_f = recent.iter().cloned().fold(f32::INFINITY, f32::min);
+                let max_f = recent
+                    .iter()
+                    .cloned()
+                    .fold(0.0f32, f32::max)
+                    .max(min_f + 1.0);
+                let p = ui.painter();
+                p.rect_filled(rect, CornerRadius::same(4), t::BG);
+                let n = (recent.len() - 1) as f32;
+                for i in 0..recent.len() - 1 {
+                    let x0 = rect.left() + rect.width() * (i as f32 / n);
+                    let x1 = rect.left() + rect.width() * ((i + 1) as f32 / n);
+                    let y0 = rect.bottom()
+                        - rect.height() * ((recent[i] - min_f) / (max_f - min_f)).clamp(0.0, 1.0);
+                    let y1 = rect.bottom()
+                        - rect.height()
+                            * ((recent[i + 1] - min_f) / (max_f - min_f)).clamp(0.0, 1.0);
+                    p.line_segment(
+                        [egui::pos2(x0, y0), egui::pos2(x1, y1)],
+                        Stroke::new(1.5, t::ACCENT),
+                    );
+                }
+            }
+        }
+
         ui.horizontal(|ui| {
             let write = egui::Button::new(if self.knobs_dirty {
                 "Write cfg *"
@@ -1992,6 +2138,17 @@ fn about_page(ui: &mut egui::Ui) {
         ))
         .font(t::plex(12.5))
         .color(t::TEXT_SOFT),
+    );
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(
+            "Paths (honest): Native DLSS games → Opti / RenoDX / Upstream (hooks the game’s own DLSS). \
+             Games without DLSS → Feeder Present path (NR on the finished frame). \
+             Optional early color (D3D11 SceneColor snap, off by default) can feed before post/TAA when a \
+             candidate RT is found; otherwise Feeder falls back to Present. DX9/12 early inject is not claimed yet.",
+        )
+        .font(t::plex(12.0))
+        .color(t::TEXT_MUTED),
     );
     ui.add_space(6.0);
     ui.label(RichText::new("Everything it installs is downloaded from the projects that made it. Credits and sources:").font(t::plex(12.0)).color(t::TEXT_MUTED));
@@ -2568,14 +2725,16 @@ impl eframe::App for App {
                             let name = |m: Option<game::Mode>| match m {
                                 None => match s.mode_detected {
                                     game::Mode::Native => {
-                                        "Auto: native DLSS · renodx hooks game (Feeder Optimize N/A)"
+                                        "Auto: native DLSS · Opti / RenoDX / Upstream (not Feeder)"
                                     }
-                                    game::Mode::Feeder => "Auto: no DLSS · Feeder path + Optimize",
+                                    game::Mode::Feeder => "Auto: no DLSS · Feeder Present path + Optimize",
                                 },
                                 Some(game::Mode::Native) => {
-                                    "Force native DLSS (Feeder Optimize N/A)"
+                                    "Force native DLSS (Opti / RenoDX — Feeder Optimize N/A)"
                                 }
-                                Some(game::Mode::Feeder) => "Force no-DLSS (Feeder + Optimize)",
+                                Some(game::Mode::Feeder) => {
+                                    "Force Feeder Present (override — only if you know you want it)"
+                                }
                             };
                             let before = choice;
                             egui::ComboBox::from_id_salt("mode_pick")
@@ -2617,7 +2776,7 @@ impl eframe::App for App {
                 if let Some(s) = &ok_status {
                     let mut caps: Vec<&str> = Vec::new();
                     if s.mode == game::Mode::Native {
-                        caps.push("Native DLSS (Feeder Optimize N/A)");
+                        caps.push("Native DLSS → Opti / RenoDX / Upstream (not Feeder)");
                     }
                     if s.rt_likely {
                         caps.push("RT-likely");
@@ -2626,7 +2785,7 @@ impl eframe::App for App {
                         caps.push("RE Engine");
                     }
                     if s.unreal_likely {
-                        caps.push("Unreal-likely");
+                        caps.push("Unreal-likely · tip: r.AntiAliasingMethod=0");
                     }
                     if s.unity_likely {
                         caps.push("Unity-likely");
@@ -2640,6 +2799,46 @@ impl eframe::App for App {
                                 .font(t::plex(11.5))
                                 .color(t::TEXT_MUTED),
                         );
+                    }
+                    if s.mode == game::Mode::Native
+                        && (game::mode_override() == Some(game::Mode::Feeder)
+                            || crate::game_overrides::find_override(&s.exe)
+                                .is_some_and(|o| o.prefer_native_engine == Some(true)
+                                    && game::mode_override() == Some(game::Mode::Feeder)))
+                    {
+                        ui.label(
+                            RichText::new(
+                                "Warning: Force Feeder on a native-DLSS game skips Opti/RenoDX. \
+                                 Prefer Auto or Force native unless you are testing Present-path Feeder.",
+                            )
+                            .font(t::plex(12.0))
+                            .color(t::DANGER),
+                        );
+                    }
+                    if s.mode == game::Mode::Native {
+                        if let Some(o) = crate::game_overrides::find_override(&s.exe) {
+                            if o.prefer_native_engine == Some(true)
+                                && game::mode_override() != Some(game::Mode::Feeder)
+                            {
+                                ui.label(
+                                    RichText::new(
+                                        "Native DLSS title: default to Opti / RenoDX / Upstream — \
+                                         do not Force Feeder unless you explicitly override.",
+                                    )
+                                    .font(t::plex(12.0))
+                                    .color(t::TEXT_SOFT),
+                                );
+                            }
+                        }
+                    }
+                    if let Some(o) = crate::game_overrides::find_override(&s.exe) {
+                        if let Some(tip) = o.setup_tip.as_ref().filter(|t| !t.is_empty()) {
+                            ui.label(
+                                RichText::new(tip.clone())
+                                    .font(t::plex(12.0))
+                                    .color(t::TEXT_SOFT),
+                            );
+                        }
                     }
                 }
                 if let Some(ac) = ok_status.as_ref().and_then(|s| s.anticheat) {
@@ -2656,7 +2855,11 @@ impl eframe::App for App {
 
                 // ── engine chooser ───────────────────────────────
                 let native = ok_status.as_ref().is_some_and(|s| s.mode == game::Mode::Native);
+                // Native discipline: never silently force Feeder. Non-native → ReShade/Feeder only.
                 if !native {
+                    self.engine = Engine::ReShade;
+                } else if self.engine != Engine::Opti && self.engine != Engine::ReShade {
+                    // Default native path: RenoDX / Upstream via ReShade (or Opti if already set).
                     self.engine = Engine::ReShade;
                 }
                 ui.horizontal(|ui| {
@@ -2668,9 +2871,9 @@ impl eframe::App for App {
                     );
                     ui.label(
                         RichText::new(if native {
-                            "— two ways to run DLSS 5 in this game, pick one"
+                            "— game has own DLSS: pick Opti, RenoDX, or Upstream — not Feeder"
                         } else {
-                            "— this game has no DLSS of its own, so only the ReShade path can work"
+                            "— no native DLSS: ReShade + Feeder Present path (early color optional, off by default)"
                         })
                         .font(t::plex(11.0))
                         .color(t::TEXT_DIM),

@@ -1839,12 +1839,26 @@ fn step_config(_c: &Client, st: &GameStatus, _w: &Path, progress: Progress) -> R
     reshade_ini::write_feed_fx_uniforms(st.game_dir(), &quality_preset::feed_fx_uniforms(&q))?;
     reshade_ini::write_traa_ui_defaults(st.game_dir())?;
     write_feeder_cfg(st.game_dir(), &q)?;
+    if st.rt_likely {
+        let _ = crate::game_overrides::apply_rt_likely_seed(st.game_dir());
+    }
     let mut out = vec![
         game::RESHADE_INI.into(),
         game::RESHADE_PRESET.into(),
         "dlss5-feed.cfg".into(),
     ];
-    progress(100, "ReShade + feeder defaults (Optimize on first attach)");
+    if let Some(msg) = crate::game_overrides::apply_for_game(st.game_dir(), &st.exe)? {
+        out.push(msg.clone());
+        progress(100, &msg);
+    } else if st.rt_likely {
+        progress(
+            100,
+            "ReShade + feeder defaults (RT-likely seed; Optimize on first attach)",
+        );
+        out.push("dlss5-feed.cfg (RT-likely seed)".into());
+    } else {
+        progress(100, "ReShade + feeder defaults (Optimize on first attach)");
+    }
     if let Some(msg) = apply_traa_ui_patch(st.game_dir())? {
         out.push(msg);
     }

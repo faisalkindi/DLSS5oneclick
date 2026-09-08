@@ -337,6 +337,12 @@ pub fn feeder_cfg_text(r: &ResolvedQuality) -> String {
          velocity_cand=-1\n\
          velocity_decode=0\n\
          velocity_scale=1.000\n\
+         early_color=0\n\
+         early_color_cand=-1\n\
+         async_feed=0\n\
+         key_async_feed=121\n\
+         hud_stats=0\n\
+         key_hud=120\n\
          quality_preset={}\n\
          auto_profile_applied=0\n\
          auto_profile=\n",
