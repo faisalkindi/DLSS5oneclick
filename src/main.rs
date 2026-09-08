@@ -3,6 +3,7 @@
 mod diagnose;
 mod feeder_cfg;
 mod game;
+mod game_overrides;
 mod gpu;
 mod gpupref;
 mod gui;
@@ -11,6 +12,7 @@ mod library;
 mod logo;
 mod net;
 mod ngx;
+mod perf;
 mod quality_preset;
 mod renodx;
 mod reshade_ini;

@@ -8,6 +8,7 @@ use crate::installer::{self, Engine, StepState};
 use crate::library::{self, Game, Store};
 use crate::logo;
 use crate::net;
+use crate::perf;
 use crate::quality_preset::QualityChoice;
 use crate::renodx;
 use crate::settings::Settings;
@@ -103,6 +104,8 @@ pub struct App {
     knobs: Option<FeederKnobs>,
     knobs_err: Option<String>,
     knobs_dirty: bool,
+    perf_samples: Vec<perf::PerfSample>,
+    expected_fps_label: String,
     /// Collapsed install log shows a one-line summary.
     log_expanded: bool,
     /// First-run tip dismissed (also persisted in eframe storage / settings).
@@ -252,6 +255,8 @@ impl App {
             knobs: None,
             knobs_err: None,
             knobs_dirty: false,
+            perf_samples: Vec::new(),
+            expected_fps_label: String::new(),
             log_expanded: true,
             tip_dismissed: cc
                 .storage
@@ -318,6 +323,8 @@ impl App {
         self.knobs = None;
         self.knobs_err = None;
         self.knobs_dirty = false;
+        self.perf_samples.clear();
+        self.expected_fps_label.clear();
         let Some(exe) = self.resolved_exe.clone() else {
             return;
         };
@@ -326,10 +333,34 @@ impl App {
         };
         match feeder_cfg::load(&dir) {
             Ok(k) => {
+                self.perf_samples = perf::load(&dir);
+                self.refresh_expected_fps(&k);
                 self.knobs = Some(k);
             }
             Err(e) => self.knobs_err = Some(format!("{e:#}")),
         }
+    }
+
+    fn refresh_expected_fps(&mut self, k: &FeederKnobs) {
+        self.expected_fps_label = match perf::expected_fps(&self.perf_samples, k) {
+            Some(e) => format!(
+                "≈ {:.0} FPS expected ({:.0}% conf, {} neigh)",
+                e.fps,
+                e.confidence * 100.0,
+                e.neighbours
+            ),
+            None => {
+                if self.perf_samples.is_empty() {
+                    "need in-game session (no dlss5-perf.jsonl yet)".into()
+                } else {
+                    format!(
+                        "need in-game session ({} samples, want ≥{})",
+                        self.perf_samples.len(),
+                        perf::MIN_SAMPLES
+                    )
+                }
+            }
+        };
     }
 
     fn apply_settings_to_game(&mut self) {
@@ -1909,7 +1940,64 @@ impl App {
         }
         if changed {
             self.knobs_dirty = true;
+            if let Some(k) = self.knobs.clone() {
+                self.refresh_expected_fps(&k);
+            }
         }
+        ui.label(
+            RichText::new(self.expected_fps_label.clone())
+                .font(t::plex(12.0))
+                .color(t::ACCENT),
+        );
+        if !self.perf_samples.is_empty() {
+            ui.label(
+                RichText::new(format!(
+                    "{} perf samples in dlss5-perf.jsonl",
+                    self.perf_samples.len()
+                ))
+                .font(t::plex(11.0))
+                .color(t::TEXT_DIM),
+            );
+            let recent: Vec<f32> = self
+                .perf_samples
+                .iter()
+                .rev()
+                .take(40)
+                .map(|s| s.fps)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            if recent.len() >= 2 {
+                let (rect, _) = ui.allocate_exact_size(
+                    Vec2::new(ui.available_width().min(420.0), 36.0),
+                    egui::Sense::hover(),
+                );
+                let min_f = recent.iter().cloned().fold(f32::INFINITY, f32::min);
+                let max_f = recent
+                    .iter()
+                    .cloned()
+                    .fold(0.0f32, f32::max)
+                    .max(min_f + 1.0);
+                let p = ui.painter();
+                p.rect_filled(rect, CornerRadius::same(4), t::BG);
+                let n = (recent.len() - 1) as f32;
+                for i in 0..recent.len() - 1 {
+                    let x0 = rect.left() + rect.width() * (i as f32 / n);
+                    let x1 = rect.left() + rect.width() * ((i + 1) as f32 / n);
+                    let y0 = rect.bottom()
+                        - rect.height() * ((recent[i] - min_f) / (max_f - min_f)).clamp(0.0, 1.0);
+                    let y1 = rect.bottom()
+                        - rect.height()
+                            * ((recent[i + 1] - min_f) / (max_f - min_f)).clamp(0.0, 1.0);
+                    p.line_segment(
+                        [egui::pos2(x0, y0), egui::pos2(x1, y1)],
+                        Stroke::new(1.5, t::ACCENT),
+                    );
+                }
+            }
+        }
+
         ui.horizontal(|ui| {
             let write = egui::Button::new(if self.knobs_dirty {
                 "Write cfg *"

@@ -1,0 +1,81 @@
+{
+  "_comment": "Local curated quirks for DLSS5oneclick Install. Matched by exe stem (case-insensitive) or path substring. Applied into dlss5-feed.cfg after quality seed. No cloud.",
+  "overrides": [
+    {
+      "match_exe": ["Gothic3", "Gothic 3"],
+      "match_path": ["Gothic 3"],
+      "note": "DX9 via dgVoodoo; no engine velocity — prefer estimated_mv-friendly seed",
+      "ofa_enabled": true,
+      "ofa_grid": 2,
+      "ofa_perf": 10,
+      "engine_velocity": true,
+      "reset_mode": 1,
+      "light_stab": true,
+      "light_stab_strength": 0.35,
+      "work_resolution": 100,
+      "auto_profile_applied": 0
+    },
+    {
+      "match_exe": ["MassEffect1", "MassEffect2", "MassEffect3", "MassEffect"],
+      "match_path": ["Mass Effect Legendary", "Mass Effect"],
+      "note": "UE3 LE — velocity hunt often wrong; seed Every+LightStab, let Optimize retune",
+      "ofa_enabled": true,
+      "ofa_grid": 2,
+      "ofa_perf": 10,
+      "engine_velocity": true,
+      "reset_mode": 1,
+      "light_stab": true,
+      "light_stab_strength": 0.50,
+      "light_stab_max_delta": 0.20,
+      "work_resolution": 100,
+      "auto_profile_applied": 0
+    },
+    {
+      "match_exe": ["TS4_x64", "TS4"],
+      "match_path": ["The Sims 4"],
+      "note": "No velocity; feed is heavy — start at 75% work, OFA MEDIUM",
+      "ofa_enabled": true,
+      "ofa_grid": 2,
+      "ofa_perf": 10,
+      "engine_velocity": true,
+      "reset_mode": 1,
+      "light_stab": false,
+      "work_resolution": 75,
+      "auto_profile_applied": 0
+    },
+    {
+      "match_exe": ["re2", "re3", "re4", "re8", "re7", "reVillage", "re4.exe"],
+      "match_path": ["RESIDENT EVIL", "Resident Evil", "BIOHAZARD"],
+      "note": "RE Engine — needs REFramework; DX12 often; no OFA seed",
+      "ofa_enabled": false,
+      "engine_velocity": true,
+      "reset_mode": 2,
+      "light_stab": true,
+      "light_stab_strength": 0.30,
+      "work_resolution": 100,
+      "auto_profile_applied": 0
+    },
+    {
+      "match_exe": ["Witcher3", "witcher3"],
+      "match_path": ["The Witcher 3"],
+      "note": "REDengine — Feeder DX11 path when no native DLSS; medium cost seed",
+      "ofa_enabled": true,
+      "ofa_grid": 2,
+      "engine_velocity": true,
+      "reset_mode": 2,
+      "work_resolution": 90,
+      "auto_profile_applied": 0
+    },
+    {
+      "match_exe": ["Cyberpunk2077"],
+      "match_path": ["Cyberpunk 2077"],
+      "note": "Usually Native DLSS — override only if Force Feeder; RT-heavy",
+      "ofa_enabled": false,
+      "engine_velocity": true,
+      "reset_mode": 1,
+      "light_stab": true,
+      "work_resolution": 85,
+      "auto_profile_applied": 0
+    }
+  ]
+}
