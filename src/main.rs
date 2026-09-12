@@ -11,6 +11,7 @@ mod library;
 mod logo;
 mod net;
 mod ngx;
+mod perf;
 mod quality_preset;
 mod renodx;
 mod reshade_ini;

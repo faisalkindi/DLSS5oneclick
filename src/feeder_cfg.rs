@@ -62,7 +62,6 @@ impl Default for FeederKnobs {
 
 impl FeederKnobs {
     /// Axes used for nearest-neighbor FPS lookup (normalized 0..1 later).
-    #[allow(dead_code)]
     pub fn knobs_vec(&self) -> [f32; 6] {
         [
             self.work_resolution as f32 / 100.0,
