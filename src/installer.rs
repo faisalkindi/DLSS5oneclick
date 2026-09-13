@@ -451,16 +451,36 @@ fn manifest_repo(manifest: &str) -> Option<String> {
 /// "nightly" releases whose assets are `.7z`, and taking a release's first
 /// asset blindly picked a checksum text file or an archive the installer
 /// cannot open.
-fn pick_opti_zip(releases: &[Value]) -> Option<String> {
+///
+/// From v0.8.3 the pre-SR fork ships two zips per release — the standard build
+/// and an `-rtx40-mfg` variant — and lists the MFG one first. Taking the first
+/// zip would have handed the unlock build to everyone, against the author's
+/// own "choose the standard ZIP unless you need the optional RTX 40 MFG
+/// unlock". The variant is chosen by the MFG tick; a release with only one zip
+/// still gets that one.
+fn pick_opti_zip(releases: &[Value], want_mfg: bool) -> Option<String> {
     releases
         .iter()
         .filter(|r| r["prerelease"] != Value::Bool(true))
         .find_map(|r| {
-            r.get("assets")?.as_array()?.iter().find_map(|a| {
-                let url = a.get("browser_download_url")?.as_str()?;
-                let name = a.get("name")?.as_str()?.to_ascii_lowercase();
-                (name.ends_with(".zip") && !name.contains("sha256")).then(|| url.to_owned())
-            })
+            let zips: Vec<(String, String)> = r
+                .get("assets")?
+                .as_array()?
+                .iter()
+                .filter_map(|a| {
+                    let url = a.get("browser_download_url")?.as_str()?;
+                    let name = a.get("name")?.as_str()?.to_ascii_lowercase();
+                    (name.ends_with(".zip") && !name.contains("sha256"))
+                        .then(|| (name, url.to_owned()))
+                })
+                .collect();
+            if zips.is_empty() {
+                return None;
+            }
+            zips.iter()
+                .find(|(n, _)| n.contains("-mfg") == want_mfg)
+                .or_else(|| zips.first())
+                .map(|(_, u)| u.clone())
         })
 }
 
@@ -508,19 +528,32 @@ fn step_opti(
     }
     // Stable release only (releases/latest skips pre-releases); the API list
     // and the releases page both put betas first.
+    // Two zips per release since the pre-SR fork's v0.8.3: the standard build
+    // ends in its version digit, the RTX 40 MFG variant in "-mfg". The tick
+    // decides; a release with a single zip matches the fallback either way.
+    let want_mfg = ada_mfg() == "true";
+    let by_name = |tag: &str| -> Result<String> {
+        let specific = if want_mfg {
+            r#"[^"]+-mfg\.zip"#
+        } else {
+            r#"[^"]+\d\.zip"#
+        };
+        net::github_asset_url_html(client, repo, tag, specific)
+            .or_else(|_| net::github_asset_url_html(client, repo, tag, r#"[^"]+\.zip"#))
+    };
     let asset: String = match latest.clone() {
-        Some(tag) => net::github_asset_url_html(client, repo, &tag, r#"[^"]+\.zip"#)?,
+        Some(tag) => by_name(&tag)?,
         None => match net::get_json_github(client, &opti_releases_url()) {
             Ok(releases) => releases
                 .as_array()
-                .and_then(|a| pick_opti_zip(a))
+                .and_then(|a| pick_opti_zip(a, want_mfg))
                 .ok_or_else(|| anyhow!("{repo} has no release asset"))?,
             Err(_) => {
                 let tags = net::github_release_tags_html(client, repo, "v", 2)?;
                 let tag = tags
                     .first()
                     .ok_or_else(|| anyhow!("no {repo} release found"))?;
-                net::github_asset_url_html(client, repo, tag, r#"[^"]+\.zip"#)?
+                by_name(tag)?
             }
         },
     };
@@ -2770,9 +2803,35 @@ mod tests {
             ]}
         ]);
         assert_eq!(
-            pick_opti_zip(releases.as_array().unwrap()).as_deref(),
+            pick_opti_zip(releases.as_array().unwrap(), false).as_deref(),
             Some("https://x/good.zip")
         );
+        // A single zip serves either tick state.
+        assert_eq!(
+            pick_opti_zip(releases.as_array().unwrap(), true).as_deref(),
+            Some("https://x/good.zip")
+        );
+    }
+
+    /// v0.8.3 of the pre-SR fork ships a standard zip and an -rtx40-mfg one,
+    /// MFG listed first. The tick picks; nobody gets the unlock build by
+    /// accident of asset order.
+    #[test]
+    fn opti_mfg_variant_follows_the_tick() {
+        let releases = json!([
+            {"prerelease": false, "tag_name": "v0.8.3", "assets": [
+                {"name": "OptiScaler-NR-v0.8.3-rtx40-mfg.zip", "browser_download_url": "https://x/mfg.zip"},
+                {"name": "OptiScaler-NR-v0.8.3-rtx40-mfg.zip.sha256", "browser_download_url": "https://x/mfg.sha"},
+                {"name": "OptiScaler-NR-v0.8.3.zip", "browser_download_url": "https://x/std.zip"},
+                {"name": "OptiScaler-NR-v0.8.3.zip.sha256", "browser_download_url": "https://x/std.sha"}
+            ]}
+        ]);
+        let r = releases.as_array().unwrap();
+        assert_eq!(
+            pick_opti_zip(r, false).as_deref(),
+            Some("https://x/std.zip")
+        );
+        assert_eq!(pick_opti_zip(r, true).as_deref(), Some("https://x/mfg.zip"));
     }
 
     /// The engine choice decides which fork is fetched, and nothing else.
