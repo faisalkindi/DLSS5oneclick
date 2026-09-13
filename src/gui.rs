@@ -96,6 +96,8 @@ pub struct App {
     renodx_classic: bool,
     /// OptiScaler route, RTX 40 only: the fork's built-in MFG unlock (#83).
     ada_mfg: bool,
+    /// OptiScaler route, D3D12, any RTX: FSR 3.1 frame generation (2X).
+    opti_fg: bool,
     renodx: RenodxLookup,
     renodx_rx: Option<Receiver<RenodxLookup>>,
     /// Exe the current lookup belongs to, so a refresh does not re-fetch.
@@ -246,6 +248,7 @@ impl App {
             opti_presr: false,
             renodx_classic: false,
             ada_mfg: false,
+            opti_fg: false,
             renodx: RenodxLookup::Idle,
             renodx_rx: None,
             renodx_for: None,
@@ -446,6 +449,11 @@ impl App {
             std::env::set_var(installer::ADA_MFG_ENV, "1");
         } else {
             std::env::remove_var(installer::ADA_MFG_ENV);
+        }
+        if self.opti_fg {
+            std::env::set_var(installer::OPTI_FG_ENV, "1");
+        } else {
+            std::env::remove_var(installer::OPTI_FG_ENV);
         }
         std::env::set_var(
             installer::UPSTREAM_PRESET_ENV,
@@ -2974,6 +2982,28 @@ impl eframe::App for App {
                         );
                         if ui.add_enabled(!self.running, cb).changed() {
                             self.ada_mfg = on;
+                        }
+                    }
+                    // OptiScaler's own frame generation, any RTX card. The FSR
+                    // 3.1 libraries ship in the package already, so this is ini
+                    // keys and nothing to fetch. D3D12 only: every FG output in
+                    // that ini is a D3D12 component.
+                    if ok_status
+                        .as_ref()
+                        .is_some_and(|s| matches!(s.api, game::Api::Dx12 | game::Api::Unknown))
+                    {
+                        ui.add_space(6.0);
+                        let mut on = self.opti_fg;
+                        let cb = egui::Checkbox::new(
+                            &mut on,
+                            RichText::new(
+                                "Frame generation (2X, FSR 3.1 inside OptiScaler) \u{2014} any RTX card. Turn the game's own frame generation off; expect added latency.",
+                            )
+                            .font(t::plex(11.5))
+                            .color(t::TEXT_SOFT),
+                        );
+                        if ui.add_enabled(!self.running, cb).changed() {
+                            self.opti_fg = on;
                         }
                     }
                     ui.add_space(6.0);

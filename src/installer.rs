@@ -515,12 +515,18 @@ fn step_opti(
         };
         match (manifest_tag(&manifest), &latest) {
             (Some(a), Some(b)) if &a == b => {
-                return Ok(vec![format!("OptiScaler already current ({a})")]);
+                // Current, but the ticks may have changed since — apply them.
+                patch_opti_ini(st, d)?;
+                return Ok(vec![format!(
+                    "OptiScaler already current ({a}), settings applied"
+                )]);
             }
             (Some(a), Some(b)) => progress(0, &format!("OptiScaler {a} is out, {b} available")),
             (Some(_), None) => {
+                patch_opti_ini(st, d)?;
                 return Ok(vec![
-                    "OptiScaler present (could not check for a newer one)".to_owned()
+                    "OptiScaler present (could not check for a newer one), settings applied"
+                        .to_owned(),
                 ]);
             }
             (None, _) => progress(0, "OptiScaler version not recorded, refreshing"),
@@ -610,6 +616,29 @@ fn step_opti(
     // OptiScaler ships DLSS Neural Rendering off, and its overlay toggle lives
     // only in memory unless the user finds the Save button -- so the whole
     // point of this install had to be switched back on at every launch.
+    patch_opti_ini(st, d)?;
+    // The repo goes in beside the tag: the two builds number their releases
+    // independently, so a tag alone cannot say whether v0.7.7 is current (#88).
+    let header = latest
+        .as_deref()
+        .map(|t| format!("# tag {t}\n# repo {}\n", opti_repo()))
+        .unwrap_or_default();
+    fs::write(
+        d.join(game::OPTI_MANIFEST),
+        format!("{header}{}", installed.join("\n")),
+    )?;
+    installed.push(game::OPTI_MANIFEST.into());
+    Ok(installed)
+}
+
+/// Apply this install's choices to `OptiScaler.ini`: neural rendering on, the
+/// model resolution, and the optional frame-generation switches.
+///
+/// Called on a fresh install and again when the package is already current —
+/// the ticks are the user's, and until this ran on the "already current"
+/// path too, changing Model Resolution or ticking frame generation on an
+/// up-to-date install wrote nothing at all.
+fn patch_opti_ini(st: &GameStatus, d: &Path) -> Result<()> {
     let ini = d.join(OPTI_INI);
     if let Ok(text) = fs::read_to_string(&ini) {
         let mut cur = text;
@@ -627,8 +656,34 @@ fn step_opti(
         // setting we can honestly turn on for someone. The Ampere/Turing
         // equivalent in the same ini sideloads a DLL that has no published
         // release, so it is deliberately not offered (#83).
-        if let Some(patched) = set_ini_key(&cur, "FrameGen", "AdaMfgUnlock", ada_mfg()) {
+        //
+        // The key lives under [DLSSG], not [FrameGen] — v0.13.12 through
+        // v0.13.14 wrote it into the wrong section, where OptiScaler never
+        // read it. From the fork's v0.8.3 the key exists only in the
+        // -rtx40-mfg package, which the tick now selects; on the standard
+        // package this line appends a key nothing reads, which is harmless.
+        if let Some(patched) = set_ini_key(&cur, "DLSSG", "AdaMfgUnlock", ada_mfg()) {
             cur = patched;
+        }
+        // OptiScaler's own frame generation: FSR 3.1 interpolation over the
+        // upscaler it already runs, 2X, on any RTX card. Every library it
+        // needs ships in the package, so it is four keys. D3D12 only — every
+        // FG output in that ini is a D3D12 component. HUDFix is what the ini
+        // itself asks for with the upscaler as input ("To prevent UI
+        // glitching, Hudfix is required"). Off means untouched: the ini
+        // carries the user's own frame-generation choice from the overlay,
+        // and a refresh must not undo it.
+        if opti_fg() && matches!(st.api, game::Api::Dx12 | game::Api::Unknown) {
+            for (section, key, value) in [
+                ("FrameGen", "Enabled", "true"),
+                ("FrameGen", "FGInput", "upscaler"),
+                ("FrameGen", "FGOutput", "fsrfg"),
+                ("OptiFG", "HUDFix", "true"),
+            ] {
+                if let Some(patched) = set_ini_key(&cur, section, key, value) {
+                    cur = patched;
+                }
+            }
         }
         // RE Engine trips its own scheduler assertion unless the compute root
         // signature is put back, and fights REFramework over WndProc unless
@@ -650,18 +705,7 @@ fn step_opti(
         }
         fs::write(&ini, cur)?;
     }
-    // The repo goes in beside the tag: the two builds number their releases
-    // independently, so a tag alone cannot say whether v0.7.7 is current (#88).
-    let header = latest
-        .as_deref()
-        .map(|t| format!("# tag {t}\n# repo {}\n", opti_repo()))
-        .unwrap_or_default();
-    fs::write(
-        d.join(game::OPTI_MANIFEST),
-        format!("{header}{}", installed.join("\n")),
-    )?;
-    installed.push(game::OPTI_MANIFEST.into());
-    Ok(installed)
+    Ok(())
 }
 
 /// Remove an OptiScaler install recorded in the manifest.
@@ -2183,6 +2227,16 @@ fn ada_mfg() -> &'static str {
     }
 }
 
+/// OptiScaler's own frame generation (AMD FSR 3.1, 2X) on the OptiScaler
+/// route; unset means off. The libraries it needs ship in every OptiScaler
+/// package this tool installs, so it is ini keys and nothing else — which is
+/// what makes it offerable on RTX 20 and 30 where NVIDIA's own is not.
+pub const OPTI_FG_ENV: &str = "DLSS5ONECLICK_OPTI_FG";
+
+fn opti_fg() -> bool {
+    std::env::var_os(OPTI_FG_ENV).is_some()
+}
+
 /// Which neural-upstream strength preset to seed; 0 leaves the overlay's own.
 pub const UPSTREAM_PRESET_ENV: &str = "DLSS5ONECLICK_UPSTREAM_PRESET";
 
@@ -3203,12 +3257,50 @@ mod tests {
         assert_eq!(ada_mfg(), "true");
         std::env::remove_var(ADA_MFG_ENV);
 
-        let ini = "[FrameGen]\nAdaMfgUnlock=false\nAmpereMfgUnlock=false\n";
-        let out = set_ini_key(ini, "FrameGen", "AdaMfgUnlock", "true").unwrap();
-        assert!(out.contains("AdaMfgUnlock=true"), "{out}");
+        // The key lives under [DLSSG] in the shipped ini (v0.7.7 and the
+        // v0.8.3 -rtx40-mfg package alike); [FrameGen] holds Enabled/FGInput/
+        // FGOutput. Writing it under [FrameGen] was a silent no-op for three
+        // releases.
+        let ini =
+            "[FrameGen]\nEnabled=auto\n\n[DLSSG]\nAdaMfgUnlock=false\nAmpereMfgUnlock=false\n";
+        let out = set_ini_key(ini, "DLSSG", "AdaMfgUnlock", "true").unwrap();
+        assert!(out.contains("[DLSSG]\nAdaMfgUnlock=true"), "{out}");
+        assert!(
+            !out.contains("[FrameGen]\nEnabled=auto\nAdaMfgUnlock"),
+            "{out}"
+        );
         // The two are mutually exclusive upstream: "Never combine with
         // AdaMfgUnlock or an external MFG unlocker."
         assert!(out.contains("AmpereMfgUnlock=false"), "{out}");
+    }
+
+    /// OptiScaler's own FSR 3.1 frame generation is four ini keys on files the
+    /// package already ships. Off means the ini is not touched, because the
+    /// overlay's own frame-generation choice lives there too.
+    #[test]
+    fn opti_fg_is_four_keys_and_off_is_untouched() {
+        std::env::remove_var(OPTI_FG_ENV);
+        assert!(!opti_fg());
+        std::env::set_var(OPTI_FG_ENV, "1");
+        assert!(opti_fg());
+        std::env::remove_var(OPTI_FG_ENV);
+
+        let ini =
+            "[FrameGen]\nEnabled=auto\nFGInput=auto\nFGOutput=auto\n\n[OptiFG]\nHUDFix=auto\n";
+        let mut cur = ini.to_owned();
+        for (section, key, value) in [
+            ("FrameGen", "Enabled", "true"),
+            ("FrameGen", "FGInput", "upscaler"),
+            ("FrameGen", "FGOutput", "fsrfg"),
+            ("OptiFG", "HUDFix", "true"),
+        ] {
+            cur = set_ini_key(&cur, section, key, value).unwrap();
+        }
+        assert!(
+            cur.contains("[FrameGen]\nEnabled=true\nFGInput=upscaler\nFGOutput=fsrfg"),
+            "{cur}"
+        );
+        assert!(cur.contains("[OptiFG]\nHUDFix=true"), "{cur}");
     }
 
     #[test]
