@@ -281,7 +281,29 @@ pub enum Engine {
     /// Dagherbou's OptiScaler fork with the built-in Neural Rendering pass.
     /// Games with native DLSS only (the pass reads the inputs the game hands to DLSS).
     Opti,
+    /// ReShade + kibblerz's standalone AIO add-on: neural rendering, super
+    /// resolution and frame generation from one add-on, in games with no DLSS
+    /// of their own. 64-bit games only here.
+    Aio,
 }
+
+const STEP_AIO: Step = Step {
+    name: "DLSS5 ReShade AIO (standalone add-on)",
+    run: step_aio,
+};
+const STEP_AIO_RUNTIME: Step = Step {
+    name: "NVIDIA DLSS + frame-generation runtimes",
+    run: step_aio_runtime,
+};
+const STEP_AIO_CONFIG: Step = Step {
+    name: "ReShade config",
+    run: step_aio_config,
+};
+const STEP_AIO_CLEANUP: Step = Step {
+    name: "Remove the standalone AIO add-on (another consumer replaces it)",
+    run: step_aio_cleanup,
+};
+pub const AIO_REPO: &str = "kibblerz/DLSS5-Reshade-AIO";
 
 const STEP_OPTI: Step = Step {
     name: "OptiScaler + DLSS Neural Rendering",
@@ -305,6 +327,7 @@ pub struct Latest {
     pub opti_presr: Option<String>,
     pub dlss: Option<String>,
     pub dlssnr: Option<String>,
+    pub aio: Option<String>,
 }
 
 impl Latest {
@@ -319,6 +342,7 @@ impl Latest {
                 .map(|(t, _)| t)
                 .or_else(|| rhi_latest(client, "dlss-").ok().map(|(t, _)| t)),
             dlssnr: rhi_latest(client, "dlssnr-").ok().map(|(t, _)| t),
+            aio: net::latest_tag(client, AIO_REPO).ok(),
         }
     }
 }
@@ -327,6 +351,18 @@ impl Latest {
 /// Used so the UI never says "Everything is in place" on a partial copy.
 pub fn missing_install_files(st: &GameStatus) -> Vec<String> {
     let mut missing = Vec::new();
+    if st.aio && !st.opti {
+        if !st.reshade {
+            missing.push(format!("{} (ReShade)", game::RESHADE_PROXY));
+        }
+        if !st.dlssnr {
+            missing.push(game::DLSSNR_DLL.into());
+        }
+        if !st.dlss {
+            missing.push(game::DLSS_DLL.into());
+        }
+        return missing;
+    }
     match st.mode {
         game::Mode::Feeder => {
             if !st.reshade {
@@ -409,6 +445,9 @@ pub fn stale_components(dir: &Path, latest: &Latest) -> Vec<String> {
         mine(game::DLSSNR_MARKER),
         &latest.dlssnr,
     );
+    if let Ok(m) = fs::read_to_string(dir.join(game::AIO_MANIFEST)) {
+        check("DLSS5 ReShade AIO", manifest_tag(&m), &latest.aio);
+    }
     if let Ok(m) = fs::read_to_string(dir.join(game::OPTI_MANIFEST)) {
         // Compare against the repo this install came from. Comparing a pre-SR
         // tag (v0.7.7) with the stable build's (v0.2.0-dlssnr) reported an
@@ -713,7 +752,23 @@ fn patch_opti_ini(st: &GameStatus, d: &Path) -> Result<()> {
 
 /// Remove an OptiScaler install recorded in the manifest.
 fn uninstall_opti(d: &Path, removed: &mut Vec<String>) -> Result<()> {
-    let manifest = d.join(game::OPTI_MANIFEST);
+    uninstall_manifest(
+        d,
+        game::OPTI_MANIFEST,
+        &["OptiScaler/D3D12_OptiScaler", "OptiScaler", "Licenses"],
+        removed,
+    )
+}
+
+/// Remove every file listed in `manifest_name`, then the manifest itself and
+/// any of `empty_dirs` the archive created that are now empty.
+fn uninstall_manifest(
+    d: &Path,
+    manifest_name: &str,
+    empty_dirs: &[&str],
+    removed: &mut Vec<String>,
+) -> Result<()> {
+    let manifest = d.join(manifest_name);
     let Ok(list) = fs::read_to_string(&manifest) else {
         return Ok(());
     };
@@ -734,15 +789,19 @@ fn uninstall_opti(d: &Path, removed: &mut Vec<String>) -> Result<()> {
         }
     }
     // Clean now-empty folders the archive created.
-    for sub in ["OptiScaler/D3D12_OptiScaler", "OptiScaler", "Licenses"] {
+    for sub in empty_dirs {
         let p = d.join(sub.replace('/', std::path::MAIN_SEPARATOR_STR));
         if p.is_dir() && fs::read_dir(&p)?.next().is_none() {
             fs::remove_dir(&p)?;
         }
     }
     fs::remove_file(&manifest)?;
-    removed.push(game::OPTI_MANIFEST.into());
+    removed.push(manifest_name.into());
     Ok(())
+}
+
+fn uninstall_aio(d: &Path, removed: &mut Vec<String>) -> Result<()> {
+    uninstall_manifest(d, game::AIO_MANIFEST, &["licenses"], removed)
 }
 
 pub const BRIDGE_DOWNLOAD: &str =
@@ -1075,7 +1134,16 @@ fn step_renodx(
 /// the OptiScaler engine that needs ReShade too, loaded by OptiScaler as
 /// `ReShade64.dll`. RE Engine games get REFramework first on either engine.
 pub fn plan_with(st: &GameStatus, engine: Engine, with_renodx: bool, upstream: bool) -> Vec<Step> {
-    let mut v = if engine == Engine::Opti {
+    let mut v = if engine == Engine::Aio {
+        // The AIO is the whole consumer: ReShade to load it, the model and
+        // NVIDIA's runtimes beside it. No Feeder, no RenoDX add-on.
+        let mut v = vec![STEP_RESHADE, STEP_AIO, STEP_DLSSNR_ONLY, STEP_AIO_RUNTIME];
+        if with_renodx {
+            v.push(STEP_RENODX);
+        }
+        v.push(STEP_AIO_CONFIG);
+        v
+    } else if engine == Engine::Opti {
         // Only games with native DLSS: the NR pass reads the inputs the game
         // hands to DLSS. Callers gate on mode; return the plan regardless so
         // --check can show it.
@@ -1097,7 +1165,7 @@ pub fn plan_with(st: &GameStatus, engine: Engine, with_renodx: bool, upstream: b
     // its own ini key; on the ReShade route it is this separate add-on, which
     // is what actually reached 6X for the reporter in #83. It is an .addon64,
     // so a 32-bit game's ReShade could not load it.
-    if engine != Engine::Opti && ada_mfg() == "true" && !st.is32() {
+    if engine == Engine::ReShade && ada_mfg() == "true" && !st.is32() {
         let at = v.len().saturating_sub(1); // before ReShade config
         v.insert(at, STEP_MFG);
     }
@@ -1116,6 +1184,16 @@ pub fn plan_with(st: &GameStatus, engine: Engine, with_renodx: bool, upstream: b
 }
 
 fn plan_reshade(st: &GameStatus, upstream: bool) -> Vec<Step> {
+    let mut v = plan_reshade_consumer(st, upstream);
+    // Two neural consumers in one ReShade would both create NGX features on
+    // the same frame; the AIO goes when this route takes over.
+    if st.aio {
+        v.insert(1, STEP_AIO_CLEANUP);
+    }
+    v
+}
+
+fn plan_reshade_consumer(st: &GameStatus, upstream: bool) -> Vec<Step> {
     match st.mode {
         game::Mode::Feeder => {
             let mut v = vec![STEP_RESHADE];
@@ -2026,6 +2104,161 @@ fn step_dlssnr_only(
     Ok(vec![format!("{} ({tag})", game::DLSSNR_DLL)])
 }
 
+// ── aio engine: kibblerz's standalone add-on, whole zip beside the exe ──
+
+/// Extract the 64-bit AIO release into the game folder and record every path
+/// in a manifest, tag in the header, for refresh and Remove. Any other neural
+/// consumer this tool placed goes first: two of them in one ReShade would each
+/// create NGX features on the same frame.
+fn step_aio(
+    client: &Client,
+    st: &GameStatus,
+    work: &Path,
+    progress: Progress,
+) -> Result<Vec<String>> {
+    let d = st.game_dir();
+    progress(0, "Looking up DLSS5 ReShade AIO releases");
+    let tag = net::latest_tag(client, AIO_REPO)?;
+    let mut installed = Vec::new();
+    for (name, marker) in [
+        (game::FEEDER_ADDON, Some(game::FEEDER_MARKER)),
+        (game::DLSS5_ADDON, Some(game::DLSS5_ADDON_MARKER)),
+        (game::UPSTREAM_ADDON, None),
+        (game::BRIDGE_ADDON, None),
+        (game::MFG_ADDON, None),
+    ] {
+        for f in std::iter::once(name).chain(marker) {
+            let p = d.join(f);
+            if p.is_file() {
+                fs::remove_file(&p)?;
+                if f == name {
+                    installed.push(format!("removed {f} (the AIO replaces it)"));
+                }
+            }
+        }
+    }
+    if let Ok(m) = fs::read_to_string(d.join(game::AIO_MANIFEST)) {
+        if st.aio && manifest_tag(&m).as_deref() == Some(tag.as_str()) {
+            installed.push(format!("{} already current ({tag})", game::AIO_ADDON));
+            return Ok(installed);
+        }
+        progress(0, &format!("DLSS5 ReShade AIO: {tag} is out, refreshing"));
+    }
+    let url = net::github_asset_url_html(client, AIO_REPO, &tag, r#"[^"]+-64-bit\.zip"#)?;
+    let zip_path = work.join("dlss5-aio.zip");
+    net::download(client, &url, &zip_path, "DLSS5 ReShade AIO", progress)?;
+    let f = fs::File::open(&zip_path)?;
+    let mut zip = zip::ZipArchive::new(f).context("AIO download is not a valid zip")?;
+    let names: Vec<String> = zip.file_names().map(str::to_owned).collect();
+    let mut written: Vec<String> = Vec::new();
+    for member in names {
+        let rel = member.replace('\\', "/");
+        if rel.ends_with('/') {
+            continue;
+        }
+        let parts: Vec<&str> = rel
+            .split('/')
+            .filter(|p| !p.is_empty() && *p != "." && *p != "..")
+            .collect();
+        if parts.is_empty() {
+            continue;
+        }
+        let out_rel = parts.join("/");
+        let dest = d.join(out_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        net::extract_member(&mut zip, &member, &dest)?;
+        written.push(out_rel);
+    }
+    if !written.iter().any(|p| p == game::AIO_ADDON) {
+        bail!(
+            "the AIO release had no {} — layout changed upstream",
+            game::AIO_ADDON
+        );
+    }
+    fs::write(
+        d.join(game::AIO_MANIFEST),
+        format!("# tag {tag}\n# repo {AIO_REPO}\n{}", written.join("\n")),
+    )?;
+    installed.push(format!("{} ({tag})", game::AIO_ADDON));
+    installed.extend(written.into_iter().filter(|p| p != game::AIO_ADDON));
+    installed.push(game::AIO_MANIFEST.into());
+    Ok(installed)
+}
+
+/// `nvngx_dlss.dll` and `nvngx_dlssg.dll` beside the AIO: the add-on creates
+/// its own super-resolution and frame-generation features, so both must be in
+/// the folder even in a game that never shipped them. One the game did ship is
+/// left alone.
+fn step_aio_runtime(
+    client: &Client,
+    st: &GameStatus,
+    work: &Path,
+    progress: Progress,
+) -> Result<Vec<String>> {
+    let d = st.game_dir();
+    let mut out = Vec::new();
+    for (name, marker, prefix) in [
+        (game::DLSS_DLL, game::DLSS_MARKER, "dlss-"),
+        (game::DLSSG_DLL, game::DLSSG_MARKER, "dlssg-"),
+    ] {
+        let dest = d.join(name);
+        let marker = d.join(marker);
+        if dest.is_file() && !marker.is_file() {
+            out.push(format!("{name} present (not placed by this tool)"));
+            continue;
+        }
+        progress(0, &format!("Looking up {name} releases"));
+        let (tag, url) = match nvidia_dll(client, name) {
+            Some(t) => t,
+            None => rhi_latest(client, prefix)?,
+        };
+        if dest.is_file() && fs::read_to_string(&marker).is_ok_and(|t| t.trim() == tag) {
+            out.push(format!("{name} already current ({tag})"));
+            continue;
+        }
+        if url.ends_with(".dll") {
+            let tmp = work.join(name);
+            net::download(client, &url, &tmp, name, progress)?;
+            if game::exe_bitness(&tmp).ok() != Some(64) {
+                bail!("{name} from {NVIDIA_DLSS_REPO} {tag} is not a 64-bit Windows DLL");
+            }
+            fs::copy(&tmp, &dest)?;
+        } else {
+            let z = work.join(format!("{tag}.zip"));
+            net::download(client, &url, &z, name, progress)?;
+            install_single_from_zip(&z, name, &dest)?;
+        }
+        fs::write(&marker, tag.as_bytes())?;
+        out.push(format!("{name} ({tag})"));
+    }
+    Ok(out)
+}
+
+/// ReShade.ini for the AIO: the add-on carries its own settings, so only the
+/// ini itself and a cleared disabled-add-ons list.
+fn step_aio_config(
+    _c: &Client,
+    st: &GameStatus,
+    _w: &Path,
+    progress: Progress,
+) -> Result<Vec<String>> {
+    reshade_ini::write_reshade_ini(st.game_dir())?;
+    reshade_ini::clear_disabled_addons(st.game_dir())?;
+    progress(100, "ReShade.ini written");
+    Ok(vec![game::RESHADE_INI.into()])
+}
+
+fn step_aio_cleanup(
+    _c: &Client,
+    st: &GameStatus,
+    _w: &Path,
+    progress: Progress,
+) -> Result<Vec<String>> {
+    progress(0, "Removing the standalone AIO add-on");
+    let mut removed = Vec::new();
+    uninstall_aio(st.game_dir(), &mut removed)?;
+    Ok(removed)
+}
+
 // ── native mode: a Feeder left over from an earlier install must go ─
 
 fn step_feeder_cleanup(
@@ -2550,10 +2783,15 @@ pub fn run_all_with(
     if !st.problems.is_empty() {
         bail!("{}", st.problems.join("\n"));
     }
-    if engine == Engine::ReShade {
+    if engine != Engine::Opti {
         if let Some(p) = st.reshade_engine_problem() {
             bail!("{p}");
         }
+    }
+    if engine == Engine::Aio && st.is32() {
+        bail!(
+            "The standalone AIO engine is 64-bit only here; a 32-bit game takes the Feeder path."
+        );
     }
     if upstream && (engine != Engine::ReShade || st.mode != game::Mode::Native) {
         bail!(
@@ -2743,6 +2981,7 @@ pub fn uninstall(exe: &Path) -> Result<Vec<String>> {
     }
     let mut removed = Vec::new();
     uninstall_opti(d, &mut removed)?;
+    uninstall_aio(d, &mut removed)?;
     for t in targets {
         if t.is_file() {
             fs::remove_file(&t)?;
@@ -3899,6 +4138,7 @@ RestoreComputeSignature=true
             opti_presr: Some("v0.7.7".into()),
             dlss: Some("dlss-310.9.0".into()),
             dlssnr: Some("dlssnr-310.8.SF-v2".into()),
+            aio: None,
         };
         assert!(stale_components(d, &latest).is_empty());
 
@@ -3940,6 +4180,7 @@ RestoreComputeSignature=true
             opti_presr: Some("v0.7.7".into()),
             dlss: None,
             dlssnr: None,
+            aio: None,
         };
 
         // Current pre-SR install: the repo line settles it.
@@ -4212,6 +4453,89 @@ RestoreComputeSignature=true
         let err = run_all_with(
             &exe,
             Engine::Opti,
+            false,
+            false,
+            InstallOpts {
+                quality: QualityChoice::Auto,
+                overrides: QualityOverrides::default(),
+            },
+            &|_, _| {},
+            &|_, _, _, _, _| {},
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("64-bit only"));
+    }
+
+    /// The AIO is the whole consumer: no Feeder, no RenoDX add-on; the model
+    /// and NVIDIA's two runtimes beside it. Switching back
+    /// to the ReShade route removes it first, so ReShade never loads two
+    /// neural consumers on one frame.
+    #[test]
+    fn aio_route_is_reshade_plus_the_addon_and_runtimes_only() {
+        let named = |v: &[Step]| -> Vec<&'static str> { v.iter().map(|s| s.name).collect() };
+        let st = game::stub_status(game::Mode::Feeder, game::Api::Dx12);
+        let aio = named(&plan_with(&st, Engine::Aio, false, false));
+        assert_eq!(
+            aio,
+            vec![
+                STEP_RESHADE.name,
+                STEP_AIO.name,
+                STEP_DLSSNR_ONLY.name,
+                STEP_AIO_RUNTIME.name,
+                STEP_AIO_CONFIG.name,
+                STEP_GPU_PREF.name,
+            ]
+        );
+        let mut st = game::stub_status(game::Mode::Feeder, game::Api::Dx12);
+        assert!(
+            !named(&plan_with(&st, Engine::ReShade, false, false)).contains(&STEP_AIO_CLEANUP.name)
+        );
+        st.aio = true;
+        let back = named(&plan_with(&st, Engine::ReShade, false, false));
+        assert_eq!(back[1], STEP_AIO_CLEANUP.name, "{back:?}");
+    }
+
+    #[test]
+    fn uninstall_removes_aio_manifest_files_and_nothing_else() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path();
+        let exe = make_pe(&d.join("game.exe"), game::PE_X64);
+        let shaders = d.join("reshade-shaders").join("Shaders");
+        fs::create_dir_all(&shaders).unwrap();
+        fs::create_dir_all(d.join("licenses")).unwrap();
+        fs::write(d.join(game::AIO_ADDON), b"a").unwrap();
+        fs::write(d.join("nvngx.dll"), b"bridge").unwrap();
+        fs::write(shaders.join("DLSS5_AIO_Feed.fx"), b"fx").unwrap();
+        fs::write(shaders.join("Mine.fx"), b"keep").unwrap();
+        fs::write(d.join("licenses").join("NOTICE.txt"), b"n").unwrap();
+        fs::write(
+            d.join(game::AIO_MANIFEST),
+            format!(
+                "# tag v2.2.4\n# repo {AIO_REPO}\n{}\nnvngx.dll\nreshade-shaders/Shaders/DLSS5_AIO_Feed.fx\nlicenses/NOTICE.txt",
+                game::AIO_ADDON
+            ),
+        )
+        .unwrap();
+        let removed = uninstall(&exe).unwrap();
+        assert!(removed.iter().any(|r| r == game::AIO_ADDON), "{removed:?}");
+        assert!(!d.join(game::AIO_ADDON).exists());
+        assert!(!d.join("nvngx.dll").exists());
+        assert!(!shaders.join("DLSS5_AIO_Feed.fx").exists());
+        assert!(shaders.join("Mine.fx").exists());
+        assert!(!d.join("licenses").exists());
+        assert!(!d.join(game::AIO_MANIFEST).exists());
+        // With the add-on gone, uninstall_all sees no foreign add-on either.
+        let (_, kept) = uninstall_all(&exe).unwrap();
+        assert!(kept.is_none(), "{kept:?}");
+    }
+
+    #[test]
+    fn run_all_refuses_aio_on_32bit_before_network() {
+        let t = tempfile::tempdir().unwrap();
+        let exe = make_pe(&t.path().join("game.exe"), game::PE_X86);
+        let err = run_all_with(
+            &exe,
+            Engine::Aio,
             false,
             false,
             InstallOpts {

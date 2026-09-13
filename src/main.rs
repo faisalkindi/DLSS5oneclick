@@ -22,7 +22,7 @@ mod update;
 use std::io::Write;
 use std::path::PathBuf;
 
-/// `dlss5oneclick <GAME.exe | game folder> [--remove | --remove-all | --check | --diagnose | --engine=opti | --renodx | --upstream | --imports | --ignore-anticheat | --mode=feeder|native] | --update` runs headless; no args opens the GUI.
+/// `dlss5oneclick <GAME.exe | game folder> [--remove | --remove-all | --check | --diagnose | --engine=opti|aio | --renodx | --upstream | --imports | --ignore-anticheat | --mode=feeder|native] | --update` runs headless; no args opens the GUI.
 /// Read by the NVIDIA and AMD drivers from this exe's export table to choose
 /// the discrete GPU for the whole process. Exported by the linker flags in
 /// build.rs; the values themselves are what the drivers read (#32).
@@ -165,6 +165,8 @@ error: {e:#}"
             Choice {
                 engine: if args.iter().any(|a| a == "--engine=opti" || a == "--opti") {
                     installer::Engine::Opti
+                } else if args.iter().any(|a| a == "--engine=aio" || a == "--aio") {
+                    installer::Engine::Aio
                 } else {
                     installer::Engine::ReShade
                 },
@@ -309,6 +311,12 @@ fn cli(
                 for p in &st.problems {
                     println!("  ! {}", text::tidy(p));
                 }
+                // No engine asked for: the plan follows what is in the folder.
+                let engine = match engine {
+                    installer::Engine::ReShade if st.opti => installer::Engine::Opti,
+                    installer::Engine::ReShade if st.aio => installer::Engine::Aio,
+                    e => e,
+                };
                 let names: Vec<&str> = installer::plan_with(&st, engine, with_renodx, upstream)
                     .iter()
                     .map(|s| s.name)
@@ -443,6 +451,11 @@ fn cli(
                 println!(
                     "
 Done. In game: Insert opens the OptiScaler overlay -> enable Neural Rendering (off by default)."
+                );
+            } else if engine == installer::Engine::Aio {
+                println!(
+                    "
+Done. In game: turn the game's own upscaling, anti-aliasing and frame generation off, run windowed; Home opens ReShade -> Add-ons tab -> Standalone DLSS-NR + SR."
                 );
             } else {
                 println!("

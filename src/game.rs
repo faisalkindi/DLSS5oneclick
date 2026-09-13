@@ -46,6 +46,12 @@ pub const DGVOODOO_CONF: &str = "dgVoodoo.conf";
 /// NGX snippet gates feature creation on the calling module's path containing
 /// `nvngx.dll`, and under any other name it returns 0xBAD00002 and does nothing.
 pub const UPSTREAM_ADDON: &str = "nvngx.dll.addon64";
+/// kibblerz's DLSS5 ReShade AIO: its own NR + super resolution + frame
+/// generation pipeline as one ReShade add-on, for games with no DLSS of their
+/// own. Takes the place of the Feeder and the RenoDX add-on together.
+pub const AIO_ADDON: &str = "standalone-dlssnr.addon64";
+/// Files this tool wrote for an AIO install, one path per line, tag in the header.
+pub const AIO_MANIFEST: &str = ".dlss5oneclick-aio-manifest";
 /// Files this tool wrote for an OptiScaler install, one path per line.
 pub const OPTI_MANIFEST: &str = ".dlss5oneclick-optiscaler-manifest";
 /// Sidecar written next to an `nvngx_dlss.dll` this tool placed, so it is never mistaken for the game's own.
@@ -648,7 +654,9 @@ pub fn game_ships_dlss(game_dir: &Path) -> bool {
                 if n == DLSS_DLL && !p.with_file_name(DLSS_MARKER).is_file() {
                     return true;
                 }
-                if n == "nvngx_dlssg.dll"
+                // A frame-generation runtime this tool placed for the AIO is
+                // not the game's either.
+                if (n == DLSSG_DLL && !p.with_file_name(DLSSG_MARKER).is_file())
                     || n == "nvngx_dlssd.dll"
                     || (n.starts_with("sl.") && n.ends_with(".dll"))
                 {
@@ -820,6 +828,8 @@ pub struct GameStatus {
     pub reframework: bool,
     /// matiasLombo's neural-upstream add-on is in the folder.
     pub upstream: bool,
+    /// kibblerz's standalone AIO add-on is in the folder.
+    pub aio: bool,
     /// The RTX 40 multi-frame-generation add-on is already beside the game.
     pub mfg: bool,
     /// Unreal-style layout / Shipping exe (heuristic).
@@ -867,6 +877,7 @@ pub(crate) fn stub_status(mode: Mode, api: Api) -> GameStatus {
         re_engine: false,
         reframework: false,
         upstream: false,
+        aio: false,
         mfg: false,
         unreal_likely: false,
         unity_likely: false,
@@ -972,6 +983,11 @@ impl GameStatus {
         self.mode == Mode::Native && self.api == Api::Dx11
     }
     pub fn complete(&self) -> bool {
+        // The AIO is its own consumer on either kind of game: ReShade, the
+        // add-on, the model, and NVIDIA's DLSS runtime beside it.
+        if self.aio && !self.opti {
+            return self.reshade && self.dlssnr && self.dlss;
+        }
         match self.mode {
             Mode::Feeder => {
                 self.reshade
@@ -1078,6 +1094,7 @@ pub fn inspect(exe: &Path) -> Result<GameStatus> {
         bridge: d.join(BRIDGE_ADDON).is_file() || d.join("dlss5-dx11-bridge.addon64").is_file(),
         opti: d.join(OPTI_MANIFEST).is_file(),
         upstream: d.join(UPSTREAM_ADDON).is_file(),
+        aio: d.join(AIO_ADDON).is_file(),
         mfg: d.join(MFG_ADDON).is_file(),
         gpu,
         exe: exe.to_path_buf(),
@@ -1349,6 +1366,7 @@ pub fn shaders_missing(game_dir: &Path) -> bool {
 pub fn installed_by_tool(dir: &Path) -> bool {
     [
         OPTI_MANIFEST,
+        AIO_MANIFEST,
         RENODX_MANIFEST,
         REFRAMEWORK_MARKER,
         DLSS_MARKER,

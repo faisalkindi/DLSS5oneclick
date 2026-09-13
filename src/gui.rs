@@ -514,6 +514,8 @@ impl App {
                 .map(|_| {
                     if engine == Engine::Opti {
                         "Done. In game: Insert opens the OptiScaler overlay → enable Neural Rendering.".to_owned()
+                    } else if engine == Engine::Aio {
+                        "Done. In game: turn the game's own upscaling, anti-aliasing and frame generation off, run windowed; Home opens ReShade → Add-ons tab → Standalone DLSS-NR + SR.".to_owned()
                     } else {
                         "Done. In game: Home opens ReShade → Add-ons tab → DLSS 5 Neural Rendering → enable. (Home tab saying \"no effect files\" is normal on games with their own DLSS.)".to_owned()
                     }
@@ -657,6 +659,8 @@ impl App {
             }
             self.engine = if st.opti {
                 Engine::Opti
+            } else if st.aio {
+                Engine::Aio
             } else {
                 Engine::ReShade
             };
@@ -874,6 +878,20 @@ const TILE_FEEDER32: Tile = Tile {
     optional: false,
 };
 
+const TILE_AIO: Tile = Tile {
+    title: "Standalone AIO \u{00b7} experimental",
+    detail: "standalone-dlssnr.addon64 + nvngx.dll (kibblerz) \u{00b7} nvngx_dlssnr.dll",
+    ok: |s| s.aio && s.dlssnr,
+    optional: false,
+};
+
+const TILE_AIO_RUNTIME: Tile = Tile {
+    title: "NVIDIA runtimes",
+    detail: "nvngx_dlss.dll \u{00b7} nvngx_dlssg.dll for frame generation",
+    ok: |s| s.dlss,
+    optional: false,
+};
+
 const TILE_OPTI: Tile = Tile {
     title: "OptiScaler + NR pass",
     detail: "Dagherbou fork as dxgi.dll · Insert opens its overlay",
@@ -990,6 +1008,9 @@ fn tiles_for(
 }
 
 fn base_tiles(st: Option<&GameStatus>, engine: Engine, upstream_on: bool) -> Vec<&'static Tile> {
+    if engine == Engine::Aio || st.is_some_and(|s| s.aio && !s.opti) {
+        return vec![&TILES_NATIVE[1], &TILE_AIO, &TILE_AIO_RUNTIME];
+    }
     match st.map(|s| s.mode) {
         Some(game::Mode::Native) if engine == Engine::Opti || st.is_some_and(|s| s.opti) => {
             vec![&TILES_NATIVE[0], &TILE_OPTI, &TILE_OPTI_MODEL]
@@ -2190,7 +2211,7 @@ impl eframe::App for App {
         };
 
         // A Vulkan game blocks the ReShade engine only; OptiScaler reaches it (#46).
-        if self.engine == Engine::ReShade {
+        if self.engine != Engine::Opti {
             if let Some(p) = ok_status
                 .as_ref()
                 .and_then(game::GameStatus::reshade_engine_problem)
@@ -2860,7 +2881,15 @@ impl eframe::App for App {
 
                 // ── engine chooser ───────────────────────────────
                 let native = ok_status.as_ref().is_some_and(|s| s.mode == game::Mode::Native);
-                if !native {
+                if !native && self.engine == Engine::Opti {
+                    self.engine = Engine::ReShade;
+                }
+                // The AIO is a 64-bit ReShade add-on: no 32-bit build is wired
+                // here, and ReShade cannot reach a Vulkan game from dxgi.dll.
+                let aio_ok = ok_status
+                    .as_ref()
+                    .is_some_and(|s| !s.is32() && s.reshade_engine_problem().is_none());
+                if !aio_ok && self.engine == Engine::Aio {
                     self.engine = Engine::ReShade;
                 }
                 ui.horizontal(|ui| {
@@ -2872,9 +2901,9 @@ impl eframe::App for App {
                     );
                     ui.label(
                         RichText::new(if native {
-                            "— two ways to run DLSS 5 in this game, pick one"
+                            "— three ways to run DLSS 5 in this game, pick one"
                         } else {
-                            "— this game has no DLSS of its own, so only the ReShade path can work"
+                            "— this game has no DLSS of its own: the ReShade path, or the standalone AIO"
                         })
                         .font(t::plex(11.0))
                         .color(t::TEXT_DIM),
@@ -2917,6 +2946,29 @@ impl eframe::App for App {
                         },
                     ) {
                         self.engine = Engine::Opti;
+                    }
+                    ui.add_space(gap);
+                    let (row2, _) =
+                        ui.allocate_exact_size(Vec2::new(row_w, card_h), egui::Sense::hover());
+                    if engine_card(
+                        ui,
+                        row2,
+                        self.engine == Engine::Aio,
+                        aio_ok,
+                        "ReShade + standalone AIO \u{00b7} experimental",
+                        &[
+                            "kibblerz's all-in-one add-on: neural rendering, DLSS super resolution and frame generation, no Feeder.",
+                            "In game: Home \u{2192} Add-ons \u{2192} Standalone DLSS-NR + SR. Windowed mode recommended.",
+                        ],
+                        if aio_ok {
+                            ""
+                        } else if ok_status.as_ref().is_some_and(|s| s.is32()) {
+                            "64-bit games only."
+                        } else {
+                            "Needs a game ReShade can reach from dxgi.dll."
+                        },
+                    ) {
+                        self.engine = Engine::Aio;
                     }
                 }
                 if self.engine == Engine::Opti {
