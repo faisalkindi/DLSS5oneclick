@@ -314,7 +314,10 @@ impl Latest {
             feeder: net::latest_tag(client, FEEDER_REPO).ok(),
             opti: net::latest_tag(client, OPTI_REPO).ok(),
             opti_presr: net::latest_tag(client, OPTI_PRESR_REPO).ok(),
-            dlss: rhi_latest(client, "dlss-").ok().map(|(t, _)| t),
+            // Same source order as the install: NVIDIA's tag, else the mirror's.
+            dlss: nvidia_dll(client, game::DLSS_DLL)
+                .map(|(t, _)| t)
+                .or_else(|| rhi_latest(client, "dlss-").ok().map(|(t, _)| t)),
             dlssnr: rhi_latest(client, "dlssnr-").ok().map(|(t, _)| t),
         }
     }
@@ -1258,6 +1261,22 @@ pub fn rhi_latest(client: &Client, prefix: &str) -> Result<(String, String)> {
     Ok((tag, url))
 }
 
+/// NVIDIA's own DLSS repository: `nvngx_dlss.dll` and `nvngx_dlssg.dll` sit
+/// in it at every release tag, byte-identical to the copies rhi-repo mirrors
+/// (checked at v310.9.1: same size, same SHA-256 for both). Fetching from the
+/// publisher answers the provenance question the mirror could not.
+pub const NVIDIA_DLSS_REPO: &str = "NVIDIA/DLSS";
+
+/// The newest NVIDIA/DLSS release tag and the raw URL of `name` under it —
+/// `(tag, url)`. `None` when the lookup fails; callers fall back to the mirror.
+pub fn nvidia_dll(client: &Client, name: &str) -> Option<(String, String)> {
+    let tag = net::latest_tag(client, NVIDIA_DLSS_REPO).ok()?;
+    let url = format!(
+        "https://raw.githubusercontent.com/{NVIDIA_DLSS_REPO}/{tag}/lib/Windows_x86_64/rel/{name}"
+    );
+    Some((tag, url))
+}
+
 // ── step 1: ReShade ────────────────────────────────────────────────
 
 pub fn resolve_reshade_setup(client: &Client) -> Result<(String, String)> {
@@ -1895,7 +1914,13 @@ fn step_dlss5(
         ));
     }
     for (prefix, fname, present, marker) in plan {
-        let (tag, url) = rhi_latest(client, prefix)?;
+        // NVIDIA's own DLL comes from NVIDIA's own repository when it can be
+        // reached; the mirror is the fallback, not the source.
+        let direct = fname == game::DLSS_DLL;
+        let (tag, url) = match (direct, nvidia_dll(client, fname)) {
+            (true, Some(t)) => t,
+            _ => rhi_latest(client, prefix)?,
+        };
         if present {
             match marker.map(|m| fs::read_to_string(cdir.join(m))) {
                 Some(Ok(mine)) if mine.trim() == tag => {
@@ -1909,9 +1934,23 @@ fn step_dlss5(
                 }
             }
         }
+        let dest = cdir.join(fname);
+        // A raw DLL from NVIDIA's repository is the file itself, not a zip.
+        if url.ends_with(".dll") {
+            let tmp = work.join(fname);
+            net::download(client, &url, &tmp, fname, progress)?;
+            if game::exe_bitness(&tmp).ok() != Some(64) {
+                bail!("{fname} from {NVIDIA_DLSS_REPO} {tag} is not a 64-bit Windows DLL");
+            }
+            fs::copy(&tmp, &dest)?;
+            if let Some(m) = marker {
+                fs::write(cdir.join(m), tag.as_bytes())?;
+            }
+            installed.push(format!("{fname} ({NVIDIA_DLSS_REPO} {tag})"));
+            continue;
+        }
         let z = work.join(format!("{tag}.zip"));
         net::download(client, &url, &z, fname, progress)?;
-        let dest = cdir.join(fname);
         if fname == game::DLSS5_ADDON && st.dlss5_addon {
             let f = fs::File::open(&z)?;
             let mut zip =
@@ -2142,7 +2181,12 @@ fn mfg_provider(
     let dest = d.join(game::DLSSG_DLL);
     let marker = d.join(game::DLSSG_MARKER);
     progress(0, "Looking up frame-generation runtime releases");
-    let (tag, url) = rhi_latest(client, "dlssg-")?;
+    // NVIDIA's repository first (byte-identical to the mirror at v310.9.1),
+    // the mirror when it cannot be reached.
+    let (tag, url) = match nvidia_dll(client, game::DLSSG_DLL) {
+        Some(t) => t,
+        None => rhi_latest(client, "dlssg-")?,
+    };
     if fs::read_to_string(&marker).is_ok_and(|t| t.trim() == tag) {
         return Ok(vec![format!("{} already current ({tag})", game::DLSSG_DLL)]);
     }
@@ -2150,9 +2194,21 @@ fn mfg_provider(
     if dest.is_file() && !marker.is_file() && !backup.is_file() {
         fs::rename(&dest, &backup)?;
     }
-    let z = work.join(format!("{tag}.zip"));
-    net::download(client, &url, &z, game::DLSSG_DLL, progress)?;
-    install_single_from_zip(&z, game::DLSSG_DLL, &dest)?;
+    if url.ends_with(".dll") {
+        let tmp = work.join(game::DLSSG_DLL);
+        net::download(client, &url, &tmp, game::DLSSG_DLL, progress)?;
+        if game::exe_bitness(&tmp).ok() != Some(64) {
+            bail!(
+                "{} from {NVIDIA_DLSS_REPO} {tag} is not a 64-bit Windows DLL",
+                game::DLSSG_DLL
+            );
+        }
+        fs::copy(&tmp, &dest)?;
+    } else {
+        let z = work.join(format!("{tag}.zip"));
+        net::download(client, &url, &z, game::DLSSG_DLL, progress)?;
+        install_single_from_zip(&z, game::DLSSG_DLL, &dest)?;
+    }
     fs::write(&marker, tag.as_bytes())?;
     Ok(vec![format!("{} ({tag})", game::DLSSG_DLL)])
 }
