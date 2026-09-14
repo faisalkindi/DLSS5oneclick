@@ -1038,11 +1038,60 @@ impl GameStatus {
     }
 }
 
+/// The `Content` folder of a Game Pass / Microsoft Store install: the one with
+/// `MicrosoftGame.config`, at the exe's folder or a few levels up.
+pub fn game_pass_content_dir(d: &Path) -> Option<PathBuf> {
+    d.ancestors()
+        .take(4)
+        .find(|a| a.join("MicrosoftGame.config").is_file())
+        .map(Path::to_path_buf)
+}
+
+/// Whether a Game Pass install ships NVIDIA's DLSS runtime anywhere under its
+/// `Content` folder. The exe itself may be unreadable, but the DLLs are not.
+fn game_pass_ships_dlss(content: &Path) -> bool {
+    fn walk(d: &Path, depth: u8) -> bool {
+        let Ok(rd) = fs::read_dir(d) else {
+            return false;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_file() {
+                if p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.eq_ignore_ascii_case(DLSS_DLL))
+                {
+                    return true;
+                }
+            } else if depth > 0 && p.is_dir() && walk(&p, depth - 1) {
+                return true;
+            }
+        }
+        false
+    }
+    walk(content, 4)
+}
+
 pub fn inspect(exe: &Path) -> Result<GameStatus> {
     if !exe.is_file() {
         bail!("game executable not found: {}", exe.display());
     }
     let d = exe.parent().context("exe has no parent directory")?;
+    // Game Pass installs are protected: the real exe is often unreadable, the
+    // folder refuses writes, and a dxgi.dll beside a packaged exe is never
+    // loaded. Every one of them read as "no DLSS, Feeder path" here, because
+    // what the scan finds is gamelaunchhelper.exe, a stub with nothing in it.
+    if let Some(content) = game_pass_content_dir(d) {
+        let native = if game_pass_ships_dlss(&content) {
+            "The game itself ships DLSS (nvngx_dlss.dll is in its folder), so it supports DLSS natively; only this install cannot be modified."
+        } else {
+            "No nvngx_dlss.dll anywhere in its folder, so this game has no DLSS of its own either."
+        };
+        bail!(
+            "Game Pass / Microsoft Store copy ({}): Windows protects these installs — the              executable is locked, the folder refuses writes, and a dxgi.dll placed beside a              packaged exe is never loaded — so DLSS 5 cannot be installed on this copy. The same              game from Steam, Epic or GOG works. {native}",
+            content.display()
+        );
+    }
     let bitness = exe_bitness(exe)?;
     let shaders = d.join("reshade-shaders").join("Shaders");
     let textures = d.join("reshade-shaders").join("Textures");
@@ -2318,5 +2367,31 @@ mod tests {
         fs::create_dir_all(&win64).unwrap();
         let exe = make_pe(&win64.join("MyGame-Win64-Shipping.exe"), PE_X64);
         assert!(unreal_likely(&exe, &win64));
+    }
+
+    /// Game Pass installs are protected end to end; the scan finds the
+    /// gamelaunchhelper.exe stub and read every one as "no DLSS, Feeder path".
+    /// A MicrosoftGame.config above the exe is the tell, and whether the
+    /// game ships DLSS is read from its folder, not from the locked exe.
+    #[test]
+    fn game_pass_copies_are_refused_with_the_native_dlss_verdict() {
+        let t = tempfile::tempdir().unwrap();
+        let content = t.path().join("Content");
+        fs::create_dir_all(content.join("Game").join("Binaries")).unwrap();
+        fs::write(content.join("MicrosoftGame.config"), "<Game/>").unwrap();
+        let exe = testutil::make_pe(&content.join("gamelaunchhelper.exe"), PE_X64);
+        let err = inspect(&exe).unwrap_err().to_string();
+        assert!(err.contains("Game Pass"), "{err}");
+        assert!(err.contains("no DLSS of its own"), "{err}");
+
+        fs::write(content.join("Game").join("Binaries").join(DLSS_DLL), b"x").unwrap();
+        let err = inspect(&exe).unwrap_err().to_string();
+        assert!(err.contains("ships DLSS"), "{err}");
+
+        // A plain folder is untouched by this.
+        let t2 = tempfile::tempdir().unwrap();
+        let exe2 = testutil::make_pe(&t2.path().join("game.exe"), PE_X64);
+        std::env::set_var("DLSS5ONECLICK_SKIP_GPU_CHECK", "1");
+        assert!(inspect(&exe2).is_ok());
     }
 }
