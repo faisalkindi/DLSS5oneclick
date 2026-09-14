@@ -2833,7 +2833,7 @@ pub fn run_all_with(
                 results.push((step.name.to_owned(), files));
             }
             Err(e) => {
-                let msg = format!("{e:#}");
+                let msg = access_denied_hint(&format!("{e:#}"), st.game_dir());
                 step_cb(i, n, step.name, StepState::Error, &msg);
                 if let Ok(mut slot) = INSTALL_QUALITY.lock() {
                     *slot = None;
@@ -2856,6 +2856,24 @@ pub fn run_all_with(
         );
     }
     Ok(results)
+}
+
+/// Windows refusing a write under Program Files (or a folder the game's own
+/// installer left read-only) surfaces as `os error 5`, which reads like a bug
+/// in this tool. Say what it is and what to do.
+pub fn access_denied_hint(msg: &str, dir: &Path) -> String {
+    let denied = msg.contains("os error 5)")
+        || msg.contains("Access is denied")
+        || msg.contains("PermissionDenied");
+    if !denied {
+        return msg.to_owned();
+    }
+    format!(
+        "{msg}
+
+Windows refused to write in {}. Close the game, then right-click          dlss5oneclick.exe and Run as administrator — or take ownership of the game folder          (Properties → Security), or move the game out of Program Files.",
+        dir.display()
+    )
 }
 
 /// Convenience wrapper used by CLI / GUI when no explicit quality is passed —
@@ -4547,5 +4565,15 @@ RestoreComputeSignature=true
         )
         .unwrap_err();
         assert!(err.to_string().contains("64-bit only"));
+    }
+
+    #[test]
+    fn access_denied_gets_a_run_as_administrator_hint() {
+        let d = Path::new(r"C:\Program Files\Game");
+        let hinted = access_denied_hint("failed to copy: Access is denied. (os error 5)", d);
+        assert!(hinted.contains("Run as administrator"), "{hinted}");
+        assert!(hinted.contains(r"C:\Program Files\Game"), "{hinted}");
+        let plain = access_denied_hint("no release found", d);
+        assert_eq!(plain, "no release found");
     }
 }

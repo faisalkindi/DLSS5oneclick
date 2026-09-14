@@ -820,6 +820,8 @@ pub struct GameStatus {
     pub dlss: bool,
     /// What the folder scan said, before any override.
     pub mode_detected: Mode,
+    /// What the import table said, before any `--api` override.
+    pub api_detected: Api,
     /// 32-bit only: `host64\dlss5-feed-host64.exe` and a 64-bit ReShade beside it.
     pub host_exe: bool,
     pub host_reshade: bool,
@@ -872,6 +874,7 @@ pub(crate) fn stub_status(mode: Mode, api: Api) -> GameStatus {
         dlssnr: false,
         dlss: false,
         mode_detected: mode,
+        api_detected: api,
         host_exe: false,
         host_reshade: false,
         re_engine: false,
@@ -908,6 +911,29 @@ pub fn set_mode_override(m: Option<Mode>) {
         Some(Mode::Feeder) => std::env::set_var(MODE_ENV, "feeder"),
         Some(Mode::Native) => std::env::set_var(MODE_ENV, "native"),
         None => std::env::remove_var(MODE_ENV),
+    }
+}
+
+/// `dx11` or `dx12`: override the graphics-API detection. Detection reads
+/// the import table and the engine DLLs beside the exe, and says "unknown,
+/// assuming DX12" when neither speaks; a wrong answer picks the wrong route
+/// (the DX11 bridge, the D3D12-only frame-generation gate).
+pub const API_ENV: &str = "DLSS5ONECLICK_API";
+
+pub fn api_override() -> Option<Api> {
+    match std::env::var(API_ENV).ok()?.to_ascii_lowercase().as_str() {
+        "dx11" | "d3d11" => Some(Api::Dx11),
+        "dx12" | "d3d12" => Some(Api::Dx12),
+        _ => None,
+    }
+}
+
+/// GUI dropdown / `--api=`: same switch as the environment variable.
+pub fn set_api_override(a: Option<Api>) {
+    match a {
+        Some(Api::Dx11) => std::env::set_var(API_ENV, "dx11"),
+        Some(Api::Dx12) => std::env::set_var(API_ENV, "dx12"),
+        _ => std::env::remove_var(API_ENV),
     }
 }
 
@@ -1051,7 +1077,8 @@ pub fn inspect(exe: &Path) -> Result<GameStatus> {
                 .into(),
         );
     }
-    let api = detect_api(exe);
+    let api_detected = detect_api(exe);
+    let api = api_override().unwrap_or(api_detected);
     // Plain D3D9 (Gothic 3, Aion, etc.): ReShade is dxgi.dll here, which a
     // D3D9 process never loads. Install adds official dgVoodoo 2.87.3 so DX9
     // is not a hard refuse. A foreign non-dgVoodoo d3d9.dll still blocks above.
@@ -1108,6 +1135,7 @@ pub fn inspect(exe: &Path) -> Result<GameStatus> {
         dlssnr: cdir.join(DLSSNR_DLL).is_file(),
         dlss: cdir.join(DLSS_DLL).is_file(),
         mode_detected,
+        api_detected,
         host_exe: is32 && cdir.join(HOST_EXE).is_file(),
         host_reshade: is32 && is_reshade_dll(&cdir.join(RESHADE_PROXY)),
         re_engine: d.join(RE_ENGINE_PAK).is_file(),

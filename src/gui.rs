@@ -19,7 +19,7 @@ use eframe::egui::{
     self, Align, Color32, CornerRadius, Frame, Layout, Margin, RichText, Stroke, StrokeKind, Vec2,
 };
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 
@@ -490,7 +490,10 @@ impl App {
                         }
                     )
                 })
-                .map_err(|e| format!("{e:#}"))
+                .map_err(|e| {
+                    let dir = exe.parent().map(Path::to_path_buf).unwrap_or_default();
+                    installer::access_denied_hint(&format!("{e:#}"), &dir)
+                })
             } else {
                 let p_tx = tx.clone();
                 let s_tx = tx.clone();
@@ -2748,6 +2751,33 @@ impl eframe::App for App {
                                 });
                             if choice != before && !self.running {
                                 game::set_mode_override(choice);
+                                self.inspect_resolved();
+                            }
+                            // API: same idea. Unknown is assumed DX12, and a
+                            // DX11 game read that way never gets the bridge.
+                            let mut api = game::api_override();
+                            let api_name = |a: Option<game::Api>| match a {
+                                None => match s.api_detected {
+                                    game::Api::Unknown => "Auto: API unknown, assuming DX12",
+                                    game::Api::Dx11 => "Auto: DX11",
+                                    game::Api::Dx12 => "Auto: DX12",
+                                    game::Api::Dx9 => "Auto: DX9",
+                                    game::Api::Dx10 => "Auto: DX10",
+                                    game::Api::Vulkan => "Auto: Vulkan",
+                                },
+                                Some(game::Api::Dx11) => "Force DX11",
+                                Some(_) => "Force DX12",
+                            };
+                            let api_before = api;
+                            egui::ComboBox::from_id_salt("api_pick")
+                                .selected_text(RichText::new(api_name(api)).font(t::plex(12.0)).color(t::TEXT_SOFT))
+                                .show_ui(ui, |ui| {
+                                    for a in [None, Some(game::Api::Dx11), Some(game::Api::Dx12)] {
+                                        ui.selectable_value(&mut api, a, api_name(a));
+                                    }
+                                });
+                            if api != api_before && !self.running {
+                                game::set_api_override(api);
                                 self.inspect_resolved();
                             }
                         }

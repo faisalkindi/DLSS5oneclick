@@ -22,7 +22,7 @@ mod update;
 use std::io::Write;
 use std::path::PathBuf;
 
-/// `dlss5oneclick <GAME.exe | game folder> [--remove | --remove-all | --check | --diagnose | --engine=opti|aio | --renodx | --upstream | --imports | --ignore-anticheat | --mode=feeder|native] | --update` runs headless; no args opens the GUI.
+/// `dlss5oneclick <GAME.exe | game folder> [--remove | --remove-all | --check | --diagnose | --engine=opti|aio | --renodx | --upstream | --imports | --ignore-anticheat | --mode=feeder|native | --api=dx11|dx12] | --update` runs headless; no args opens the GUI.
 /// Read by the NVIDIA and AMD drivers from this exe's export table to choose
 /// the discrete GPU for the whole process. Exported by the linker flags in
 /// build.rs; the values themselves are what the drivers read (#32).
@@ -151,6 +151,13 @@ error: {e:#}"
         std::env::set_var(game::MODE_ENV, m);
         if game::mode_override().is_none() {
             eprintln!("error: --mode must be feeder or native");
+            std::process::exit(1);
+        }
+    }
+    if let Some(a) = args.iter().find_map(|a| a.strip_prefix("--api=")) {
+        std::env::set_var(game::API_ENV, a);
+        if game::api_override().is_none() {
+            eprintln!("error: --api must be dx11 or dx12");
             std::process::exit(1);
         }
     }
