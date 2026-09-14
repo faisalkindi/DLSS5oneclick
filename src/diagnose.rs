@@ -552,10 +552,35 @@ pub fn diagnose(st: &GameStatus) -> Vec<Finding> {
                 )));
             }
         }
-        if fd.contains("MV probe") && fd.contains("0% non-zero") {
+        // The last probe is the verdict: the first ones run on a menu or a
+        // loading screen. And "100% non-zero" contains "0% non-zero", so the
+        // substring test reported every healthy log as all-zero (#99).
+        if let Some(l) = fd.lines().rev().find(|l| l.contains("MV probe")) {
+            let pct = l
+                .split("non-zero")
+                .next()
+                .and_then(|p| p.rsplit(',').next())
+                .and_then(|p| p.trim().trim_end_matches('%').parse::<u32>().ok());
+            if pct == Some(0) {
+                out.push(bad(
+                    "Motion vectors are all zero at the last probe: the provider is enabled but \
+                     writes nothing. Check that Lumenite_Kernel sits above DLSS5_Feed in the \
+                     technique list, and that ReShade's Generic Depth is on the right buffer.",
+                ));
+            }
+        }
+        if fd
+            .lines()
+            .rev()
+            .find(|l| l.contains("Depth probe"))
+            .is_some_and(|l| l.contains("flat"))
+        {
             out.push(bad(
-                "Motion vectors are all zero: the provider is enabled but writes nothing. Check \
-                 that Lumenite_Kernel sits above DLSS5_Feed in the technique list.",
+                "Depth is flat at the last probe: ReShade's Generic Depth add-on is not on the \
+                 game's depth buffer, so the Lumenite motion vectors have nothing to work from. \
+                 In game: Home → Add-ons → Generic Depth → pick the buffer at the render \
+                 resolution with the most draw calls, and tick \"Copy depth buffer before clear \
+                 operations\" (Prey, #99).",
             ));
         }
         if fd.contains("DLSS super sampling is not available") {
@@ -1352,5 +1377,50 @@ Registered add-on \"DLSS 5 Neural Rendering\"
             !f.iter().any(|x| x.text.contains("different executables")),
             "{f:?}"
         );
+    }
+
+    /// "100% non-zero" contains "0% non-zero": every healthy feed log read as
+    /// all-zero motion vectors. And the first probes run on a menu — the last
+    /// one is the verdict (#99).
+    #[test]
+    fn mv_and_depth_probes_are_read_from_the_last_line_and_parsed() {
+        let (t, exe) = setup(true);
+        let d = t.path();
+        fs::write(
+            d.join("ReShade.log"),
+            "Initializing crosire's ReShade version '6.8.0'\nRegistered add-on \"DLSS 5 Neural Rendering\"\n",
+        )
+        .unwrap();
+        fs::write(
+            d.join("dlss5-feed.log"),
+            "[feed] feature ready: 3840x2160 DLAA\n\
+             [feed] MV probe (centre 64x64, frame 600): mean |mv| 0.000 px, max 0.00 px, 0% non-zero  <-- DLSS is getting (almost) no motion vectors\n\
+             [feed] Depth probe (4x 32x32, frame 600): min 0, max 0, mean 0, variance 0, 100% finite  <-- sampled depth is flat\n\
+             [feed] MV probe (centre 64x64, frame 70800): mean |mv| 1.618 px, max 2.16 px, 100% non-zero\n\
+             [feed] Depth probe (4x 32x32, frame 70800): min 0.0075, max 0.027, mean 0.016, variance 5.58e-05, 100% finite\n",
+        )
+        .unwrap();
+        let f = diagnose(&game::inspect(&exe).unwrap());
+        assert!(
+            !f.iter()
+                .any(|x| x.text.contains("Motion vectors are all zero")),
+            "{f:?}"
+        );
+        assert!(!f.iter().any(|x| x.text.contains("Depth is flat")), "{f:?}");
+
+        fs::write(
+            d.join("dlss5-feed.log"),
+            "[feed] feature ready: 3840x2160 DLAA\n\
+             [feed] MV probe (centre 64x64, frame 600): mean |mv| 0.000 px, max 0.00 px, 0% non-zero  <-- DLSS is getting (almost) no motion vectors\n\
+             [feed] Depth probe (4x 32x32, frame 600): min 0, max 0, mean 0, variance 0, 100% finite  <-- sampled depth is flat; inspect the depth debug view\n",
+        )
+        .unwrap();
+        let f = diagnose(&game::inspect(&exe).unwrap());
+        assert!(
+            f.iter()
+                .any(|x| x.text.contains("Motion vectors are all zero")),
+            "{f:?}"
+        );
+        assert!(f.iter().any(|x| x.text.contains("Depth is flat")), "{f:?}");
     }
 }
