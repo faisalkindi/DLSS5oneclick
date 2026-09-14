@@ -325,7 +325,12 @@ pub fn diagnose(st: &GameStatus) -> Vec<Finding> {
         // Diagnose called that success (#95). Count the churn.
         let created = rs.matches("feature 18 created via").count();
         let worksets = rs.matches("second NR workset is live").count();
-        if created >= 6 || worksets >= 2 {
+        // Every F6 and every slider drag re-creates the feature too, so a
+        // count alone is not churn: a Prey session with 93 creations had
+        // reached 600 straight evaluations first (#99). The add-on logs the
+        // count at 1, 60 and 600; reaching 600 means the pass held.
+        let held = rs.contains("evaluation succeeded (count=600");
+        if worksets >= 2 || (created >= 6 && !held) {
             out.push(bad(format!(
                 "The neural pass is being torn down and re-created instead of running: the \
                  feature was created {created} times and the add-on opened {} worksets in this \
@@ -1285,6 +1290,27 @@ mod tests {
              DLSS5 Generic: inline feature 18 evaluation succeeded (count=60)\n",
         )
         .unwrap();
+        let f = diagnose(&game::inspect(&exe).unwrap());
+        assert!(
+            f.iter().any(|x| x.text.starts_with("Neural rendering ran")),
+            "{f:?}"
+        );
+
+        // Prey (#99): 93 creations from F6 mashing and slider drags, but the
+        // pass had held for 600 straight evaluations. Not churn.
+        let mut log = String::from(
+            "Initializing crosire's ReShade version '6.8.0'
+Registered add-on \"DLSS 5 Neural Rendering\"
+             DLSS5 Generic: inline feature 18 evaluation succeeded (count=600, NR input 2880x1620)
+",
+        );
+        for _ in 0..93 {
+            log.push_str(
+                "DLSS5 Generic: feature 18 created via the signed snippet after DLSS/DLAA
+",
+            );
+        }
+        fs::write(d.join("ReShade.log"), &log).unwrap();
         let f = diagnose(&game::inspect(&exe).unwrap());
         assert!(
             f.iter().any(|x| x.text.starts_with("Neural rendering ran")),
