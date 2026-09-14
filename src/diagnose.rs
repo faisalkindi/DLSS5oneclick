@@ -231,6 +231,14 @@ pub fn diagnose(st: &GameStatus) -> Vec<Finding> {
     if rs.contains("Initializing crosire's ReShade") {
         out.push(ok("ReShade loaded into the game."));
     }
+    // Neural Upstream stands in for the RenoDX add-on and logs under its own
+    // tag. Reading its log for the RenoDX add-on's lines reported "the add-on
+    // never registered" and "no NGX call was intercepted" on an install whose
+    // log showed the add-on registered and hooked (#86).
+    if st.upstream {
+        out.extend(upstream_findings(&rs));
+        return out;
+    }
     let failed_line = rs
         .lines()
         .find(|l| l.contains("Failed to load add-on") && l.contains("renodx-dlss5"));
@@ -629,6 +637,87 @@ pub fn diagnose(st: &GameStatus) -> Vec<Finding> {
 pub fn run(exe: &Path) -> Result<Vec<Finding>> {
     let st = game::inspect(exe)?;
     Ok(diagnose(&st))
+}
+
+/// What matiasLombo's neural-upstream (`nvngx.dll.addon64`, "DLSS5 NR
+/// Pre-Upscale") wrote to ReShade.log, read against its own source: the game's
+/// DLSS is logged as `CreateFeature id=1` (a DLSS create carries no DLSSNR
+/// slots, so `<no slot>` there is normal), every DLSS evaluate as `eval feat=`,
+/// and the add-on's own network as `2b: SNIPPET CreateFeature(18, …)` followed
+/// by `2c: NR Evaluate(…) -> 0x00000001` once it ran.
+fn upstream_findings(rs: &str) -> Vec<Finding> {
+    let mut out = Vec::new();
+    if let Some(l) = rs
+        .lines()
+        .find(|l| l.contains("Failed to load add-on") && l.contains("nvngx.dll.addon64"))
+    {
+        let code = l
+            .rsplit("error code ")
+            .next()
+            .unwrap_or("")
+            .trim_end_matches('!');
+        out.push(bad(format!(
+            "ReShade refused to load nvngx.dll.addon64 (Neural Upstream), error code {code}."
+        )));
+        return out;
+    }
+    if rs.contains("[NRPRE] addon registered") || rs.contains("DLSS5 NR Pre-Upscale") {
+        out.push(ok(
+            "The Neural Upstream add-on (DLSS5 NR Pre-Upscale) registered.",
+        ));
+    } else {
+        out.push(bad(
+            "The Neural Upstream add-on never registered. nvngx.dll.addon64 is missing from              the game folder, disabled in ReShade's Add-ons tab, or quarantined by antivirus.",
+        ));
+        return out;
+    }
+    if rs.contains("[NRPRE] no NGX evaluate could be hooked") {
+        out.push(bad(
+            "Neural Upstream could not hook the game's NGX evaluate: the game's DLSS runtime              was not loaded when the add-on looked for it. Turn DLSS on in the game's graphics              settings and restart the game.",
+        ));
+        return out;
+    }
+    let nr_ran = rs
+        .lines()
+        .any(|l| l.contains("2c: NR Evaluate(") && l.contains("-> 0x00000001"));
+    let nr_failed = rs
+        .lines()
+        .find(|l| l.contains("NR Evaluate(") && l.contains("FAILED"));
+    let snippet_failed = rs
+        .lines()
+        .find(|l| l.contains("SNIPPET CreateFeature(18") && !l.contains("-> 0x00000001"));
+    if nr_ran {
+        out.push(ok(
+            "Neural rendering ran: Neural Upstream evaluated the DLSS 5 model at render              resolution on real frames. If the picture looks unchanged, raise EffectStrength              (F6) in the add-on's ReShade panel.",
+        ));
+    } else if let Some(l) = nr_failed {
+        out.push(bad(format!(
+            "Neural Upstream created its network but evaluating it fails: {}",
+            l.trim()
+        )));
+    } else if let Some(l) = snippet_failed {
+        out.push(bad(format!(
+            "Neural Upstream could not create the DLSS 5 network: {}",
+            l.trim()
+        )));
+    } else if rs.contains("2b: core exports missing") {
+        out.push(bad(
+            "nvngx_dlssnr.dll beside the game is not the build Neural Upstream expects              (its NGX exports are missing). Run Install again to refresh the model.",
+        ));
+    } else if rs.contains("[NRPRE] eval feat=") {
+        out.push(warn(
+            "The game's DLSS is running frames through the add-on, but the DLSS 5 network was              never created. Press F7 in game (DLSS-NR on/off) and check the add-on's panel;              if it stays off, attach this log.",
+        ));
+    } else if rs.contains("[NRPRE] CreateFeature id=") {
+        out.push(warn(
+            "The game created its DLSS feature but never rendered a frame through it: the              session ended at a menu or loading screen. Load into gameplay, play for a minute,              then run this again.",
+        ));
+    } else {
+        out.push(bad(
+            "No NGX call was intercepted: this game's own DLSS never ran. Turn DLSS on in the              game's graphics settings (the add-on hooks the game's DLSS calls; without them it              has nothing to work with).",
+        ));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1039,5 +1128,59 @@ mod tests {
         let f = run(&exe).unwrap();
         assert!(f.iter().all(|x| x.level == Level::Ok), "{f:?}");
         assert!(f.iter().any(|x| x.text.contains("raise NR Intensity")));
+    }
+
+    /// The lines felipeptxa's RDR2 log carried (#86): the add-on registered,
+    /// hooked, and saw the game create its DLSS feature, then the session
+    /// ended at the menu. Read as the RenoDX add-on's log this was two FAILs.
+    #[test]
+    fn neural_upstream_log_is_read_by_its_own_lines() {
+        let menu = "Registered add-on \"DLSS5 NR Pre-Upscale\"
+            [NRPRE] addon registered (NR at render resolution -- configure in the ReShade overlay)
+            [NRPRE] hook 0 on NVSDK_NGX_D3D12_EvaluateFeature: OK
+            [NRPRE] hook on NVSDK_NGX_D3D12_CreateFeature: OK (module 0)
+            [NRPRE] CreateFeature id=1 -> res=0x00000001 handle=1 | NR W=4294967295 H=4294967295 ratio=-1.000 preset=-1 | DLSSNR.Color=<no slot> | DLSSNR.Output=<no slot> | DLSSNR.Depth=<no slot> | DLSSNR.MVec=<no slot>
+            [NRPRE] F11: cadence phase -> 0/1
+";
+        let f = upstream_findings(menu);
+        assert!(
+            f.iter()
+                .any(|x| x.level == Level::Ok && x.text.contains("registered")),
+            "{f:?}"
+        );
+        assert!(
+            f.iter().any(|x| x.text.contains("never rendered a frame")),
+            "{f:?}"
+        );
+        assert!(
+            !f.iter().any(|x| x.text.contains("never registered")),
+            "{f:?}"
+        );
+        assert!(!f.iter().any(|x| x.text.contains("No NGX call")), "{f:?}");
+
+        let ran = format!(
+            "{menu}[NRPRE] eval feat=1  render_subrect=1707x960 | a | b | c | d
+             [NRPRE] 2b: SNIPPET CreateFeature(18, 1707x960) -> 0x00000001 handle=000001
+             [NRPRE] 2c: NR Evaluate(HI) -> 0x00000001
+"
+        );
+        let f = upstream_findings(&ran);
+        assert!(
+            f.iter()
+                .any(|x| x.level == Level::Ok && x.text.contains("Neural rendering ran")),
+            "{f:?}"
+        );
+
+        let failed = format!(
+            "{menu}[NRPRE] eval feat=1  render_subrect=1707x960 | a | b | c | d
+             [NRPRE] 2b: SNIPPET CreateFeature(18, 1707x960) -> 0xBAD00002 handle=0000000000000000
+"
+        );
+        let f = upstream_findings(&failed);
+        assert!(
+            f.iter()
+                .any(|x| x.level == Level::Bad && x.text.contains("0xBAD00002")),
+            "{f:?}"
+        );
     }
 }
