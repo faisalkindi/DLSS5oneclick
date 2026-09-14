@@ -295,11 +295,30 @@ pub fn diagnose(st: &GameStatus) -> Vec<Finding> {
         ));
     }
     if rs.contains("inline feature 18 evaluation succeeded") {
-        out.push(ok(
-            "Neural rendering ran: the add-on evaluated the DLSS 5 model on real frames. If the \
-             picture still looks unchanged, raise NR Intensity / Local Structure in its panel — \
-             the default is subtle.",
-        ));
+        // "Ran" is not "ran on your frames". Cyberpunk 2077 drove the feature
+        // through 18 re-creations and four worksets in four minutes, reaching
+        // sixty evaluations in 95 seconds — under one frame a second — and
+        // Diagnose called that success (#95). Count the churn.
+        let created = rs.matches("feature 18 created via").count();
+        let worksets = rs.matches("second NR workset is live").count();
+        if created >= 6 || worksets >= 2 {
+            out.push(bad(format!(
+                "The neural pass is being torn down and re-created instead of running: the \
+                 feature was created {created} times and the add-on opened {} worksets in this \
+                 session. Each re-creation resets the model and costs GPU time, and almost no \
+                 frame is evaluated — FPS drops, picture unchanged. This happens in games that \
+                 drive DLSS from several threads or several NGX features (Cyberpunk 2077 with \
+                 Ray Reconstruction, #95). Try Model Resolution 100% first; if it persists, \
+                 the OptiScaler engine runs the pass inside the upscaler and is not affected.",
+                worksets + 1
+            )));
+        } else {
+            out.push(ok(
+                "Neural rendering ran: the add-on evaluated the DLSS 5 model on real frames. If the \
+                 picture still looks unchanged, raise NR Intensity / Local Structure in its panel — \
+                 the default is subtle.",
+            ));
+        }
     } else if rs.contains("feature=1 (DLSS/DLAA)") {
         out.push(warn(
             "The add-on saw the game's DLSS but has not evaluated the model yet (feature 18 never \
@@ -1198,6 +1217,53 @@ mod tests {
         assert!(
             f.iter()
                 .any(|x| x.level == Level::Bad && x.text.contains("0xBAD00002")),
+            "{f:?}"
+        );
+    }
+
+    /// Cyberpunk 2077 (#95): the pass "ran" — sixty evaluations in 95 seconds
+    /// across 18 feature re-creations and four worksets. That is churn, not
+    /// neural rendering, and Diagnose must not call it success.
+    #[test]
+    fn feature_churn_is_reported_as_a_failure_not_a_pass() {
+        let (t, exe) = setup(false);
+        let d = t.path();
+        let mut log = String::from(
+            "Initializing crosire's ReShade version '6.8.0'\nRegistered add-on \"DLSS 5 Neural Rendering\"\n",
+        );
+        for _ in 0..18 {
+            log.push_str("DLSS5 Generic: feature 18 created via the signed snippet after DLSS/DLAA for NR input 1920x1080\n");
+        }
+        for _ in 0..6 {
+            log.push_str(
+                "DLSS5 Generic: multi-pass: a second NR workset is live; independent passes\n",
+            );
+        }
+        log.push_str("DLSS5 Generic: inline feature 18 evaluation succeeded (count=60, NR input 1920x1080)\n");
+        fs::write(d.join("ReShade.log"), &log).unwrap();
+        let st = game::inspect(&exe).unwrap();
+        let f = diagnose(&st);
+        assert!(
+            f.iter()
+                .any(|x| x.level == Level::Bad && x.text.contains("created 18 times")),
+            "{f:?}"
+        );
+        assert!(
+            !f.iter().any(|x| x.text.starts_with("Neural rendering ran")),
+            "{f:?}"
+        );
+
+        // One creation, sixty frames: the pass ran.
+        fs::write(
+            d.join("ReShade.log"),
+            "Initializing crosire's ReShade version '6.8.0'\nRegistered add-on \"DLSS 5 Neural Rendering\"\n\
+             DLSS5 Generic: feature 18 created via the signed snippet after DLSS/DLAA\n\
+             DLSS5 Generic: inline feature 18 evaluation succeeded (count=60)\n",
+        )
+        .unwrap();
+        let f = diagnose(&game::inspect(&exe).unwrap());
+        assert!(
+            f.iter().any(|x| x.text.starts_with("Neural rendering ran")),
             "{f:?}"
         );
     }
