@@ -566,6 +566,24 @@ pub fn poster_rgba(client: &reqwest::blocking::Client, p: &Poster) -> Option<ima
 }
 
 #[cfg(windows)]
+/// The Windows compatibility layer set on `exe` (Properties ▸ Compatibility, or
+/// a store's own shim), from `AppCompatFlags\Layers` under HKCU then HKLM. A
+/// shimmed process reports an older Windows to NGX, whose capability query then
+/// answers PlatformError before touching any device (DLSS5-Feeder#47).
+#[cfg(windows)]
+pub fn compat_layer(exe: &Path) -> Option<String> {
+    const SUB: &str = r"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers";
+    let name = exe.to_string_lossy();
+    [reg::HKCU, reg::HKLM]
+        .into_iter()
+        .find_map(|root| reg::read_sz(root, SUB, &name))
+        .filter(|v| !v.trim().is_empty())
+}
+#[cfg(not(windows))]
+pub fn compat_layer(_exe: &Path) -> Option<String> {
+    None
+}
+
 mod reg {
     use windows_sys::Win32::System::Registry::{
         RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER,

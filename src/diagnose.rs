@@ -122,6 +122,24 @@ pub fn diagnose(st: &GameStatus) -> Vec<Finding> {
         .as_deref()
         .is_some_and(|l| l.contains("not yet implemented feature"));
 
+    // ── a Windows compatibility layer on the exe ───────────────────
+    // Watch Dogs 1 (#62) ran under apphelp/AcGenral and got SuperSampling ->
+    // 0xBAD00002 on every attempt; the Feeder's author reads PlatformError
+    // from a query that touches no device as a process reporting an older
+    // Windows, which is exactly what a shim does (DLSS5-Feeder#47).
+    if let Some(layer) = crate::library::compat_layer(&st.exe) {
+        let refused = rs_log
+            .as_deref()
+            .into_iter()
+            .chain(read(&consumer, "dlss5-feed.log").as_deref())
+            .chain(read(&consumer, "dlss5-feed-host.log").as_deref())
+            .any(|l| l.contains("0xBAD00001") || l.contains("0xBAD00002"));
+        let text = format!(
+            "Windows runs this exe under a compatibility layer ({layer}). A shimmed process              reports an older Windows to NGX, and NGX then refuses before it touches a device              (SuperSampling -> 0xBAD00002 / Init -> 0xBAD00001; Watch Dogs 1 in #62).              Right-click the exe ▸ Properties ▸ Compatibility ▸ untick everything (and the              same for the launcher if it set it), then try again."
+        );
+        out.push(if refused { bad(text) } else { warn(text) });
+    }
+
     // ── a game-shipped HLSL compiler shadowing the system one ──────
     // The add-on compiles its NR pass at cs_5_1. A d3dcompiler_47.dll that
     // ships with the game is loaded in preference to System32's, and an old
