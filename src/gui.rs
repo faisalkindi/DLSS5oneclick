@@ -1145,7 +1145,8 @@ fn engine_card(
         painter.galley(
             pill.min + Vec2::new(10.0, 4.0),
             galley,
-            if enabled { t::TEXT_OFF } else { t::TEXT_DIM },
+            // TEXT_OFF on the tile fill was barely legible (#77).
+            if enabled { t::TEXT_SOFT } else { t::TEXT_DIM },
         );
     }
 
@@ -2954,9 +2955,14 @@ impl eframe::App for App {
                 });
                 {
                     let gap = 8.0;
-                    let card_h = 74.0;
                     let row_w = ui.available_width();
-                    let col_w = ((row_w - gap) / 2.0).floor();
+                    // Three cards on one row when the window is wide enough
+                    // for their text; a full-width third card below otherwise.
+                    // The wide card left half the row empty (#77).
+                    let three_up = row_w >= 1100.0;
+                    let cols = if three_up { 3.0 } else { 2.0 };
+                    let card_h = if three_up { 88.0 } else { 74.0 };
+                    let col_w = ((row_w - gap * (cols - 1.0)) / cols).floor();
                     let (row_rect, _) =
                         ui.allocate_exact_size(Vec2::new(row_w, card_h), egui::Sense::hover());
                     let left = egui::Rect::from_min_size(row_rect.min, Vec2::new(col_w, card_h));
@@ -2990,9 +2996,16 @@ impl eframe::App for App {
                     ) {
                         self.engine = Engine::Opti;
                     }
-                    ui.add_space(gap);
-                    let (row2, _) =
-                        ui.allocate_exact_size(Vec2::new(row_w, card_h), egui::Sense::hover());
+                    let row2 = if three_up {
+                        egui::Rect::from_min_size(
+                            egui::pos2(row_rect.left() + (col_w + gap) * 2.0, row_rect.top()),
+                            Vec2::new(col_w, card_h),
+                        )
+                    } else {
+                        ui.add_space(gap);
+                        ui.allocate_exact_size(Vec2::new(row_w, card_h), egui::Sense::hover())
+                            .0
+                    };
                     if engine_card(
                         ui,
                         row2,
