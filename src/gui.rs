@@ -778,6 +778,19 @@ impl App {
         }
     }
 
+    fn save_report(&mut self) {
+        let Some(exe) = self.exe() else { return };
+        self.log.clear();
+        self.progress_msg.clear();
+        self.log.push(match crate::report::write_bundle(&exe) {
+            Ok(p) => LogLine::Ok(format!(
+                "Report written: {} — attach that zip to the GitHub issue.",
+                p.display()
+            )),
+            Err(e) => LogLine::Fail(format!("{e:#}")),
+        });
+    }
+
     fn pump_update(&mut self) {
         let Some(rx) = &self.update_rx else { return };
         let mut last = None;
@@ -3375,6 +3388,22 @@ impl eframe::App for App {
                         .clicked()
                     {
                         self.run_diagnose();
+                    }
+                    let report = egui::Button::new(
+                        RichText::new("Save report").font(t::plex_medium(13.0)).color(t::TEXT_OFF),
+                    )
+                    .fill(Color32::TRANSPARENT)
+                    .stroke(Stroke::new(1.0, t::BORDER_STRONG))
+                    .corner_radius(CornerRadius::same(8))
+                    .min_size(Vec2::new(110.0, 42.0));
+                    if ui
+                        .add_enabled(ok_status.is_some() && !self.running, report)
+                        .on_hover_text(
+                            "Writes one zip to your Desktop with this game's logs, inis, folder listing and Diagnose output — attach it to a GitHub issue.",
+                        )
+                        .clicked()
+                    {
+                        self.save_report();
                     }
                     let vulkan = ok_status
                         .as_ref()

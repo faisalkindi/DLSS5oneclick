@@ -13,6 +13,7 @@ mod net;
 mod ngx;
 mod quality_preset;
 mod renodx;
+mod report;
 mod reshade_ini;
 mod settings;
 mod text;
@@ -22,7 +23,7 @@ mod update;
 use std::io::Write;
 use std::path::PathBuf;
 
-/// `dlss5oneclick <GAME.exe | game folder> [--remove | --remove-all | --check | --diagnose | --engine=opti|aio | --renodx | --upstream | --imports | --ignore-anticheat | --mode=feeder|native | --api=dx11|dx12] | --update` runs headless; no args opens the GUI.
+/// `dlss5oneclick <GAME.exe | game folder> [--remove | --remove-all | --check | --diagnose | --report | --engine=opti|aio | --renodx | --upstream | --imports | --ignore-anticheat | --mode=feeder|native | --api=dx11|dx12] | --update` runs headless; no args opens the GUI.
 /// Read by the NVIDIA and AMD drivers from this exe's export table to choose
 /// the discrete GPU for the whole process. Exported by the linker flags in
 /// build.rs; the values themselves are what the drivers read (#32).
@@ -169,6 +170,7 @@ error: {e:#}"
             args.iter().any(|a| a == "--remove-all"),
             args.iter().any(|a| a == "--check"),
             args.iter().any(|a| a == "--diagnose"),
+            args.iter().any(|a| a == "--report"),
             Choice {
                 engine: if args.iter().any(|a| a == "--engine=opti" || a == "--opti") {
                     installer::Engine::Opti
@@ -248,6 +250,7 @@ fn cli(
     remove_all: bool,
     check: bool,
     diagnose_only: bool,
+    report: bool,
     choice: Choice,
 ) -> i32 {
     let Choice {
@@ -279,6 +282,22 @@ fn cli(
         );
     } else if !candidates.is_empty() {
         println!("using {}", exe.display());
+    }
+    if report {
+        return match report::write_bundle(&exe) {
+            Ok(p) => {
+                println!(
+                    "Report written: {}
+Attach that zip to the GitHub issue.",
+                    p.display()
+                );
+                0
+            }
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                1
+            }
+        };
     }
     if diagnose_only {
         return match diagnose::run(&exe) {
