@@ -10,8 +10,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Files worth carrying, relative to the game folder. Absent ones are skipped.
-const FILES: [&str; 17] = [
+const FILES: [&str; 19] = [
     "ReShade.log",
+    "ReShade.log1",
+    "ReShade.log2",
     "ReShade.ini",
     "ReShadePreset.ini",
     "ReShadeVR.ini",

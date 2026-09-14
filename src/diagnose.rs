@@ -114,7 +114,31 @@ pub fn diagnose(st: &GameStatus) -> Vec<Finding> {
     let d = st.game_dir();
     let mut out = Vec::new();
     let consumer = st.consumer_dir();
-    let rs_log = read(&consumer, "ReShade.log").or_else(|| read(&consumer, "ReShade2.log"));
+    let mut rs_log = read(&consumer, "ReShade.log").or_else(|| read(&consumer, "ReShade2.log"));
+    // Rockstar's Launcher.exe sits in RDR2's folder and loads dxgi.dll too, so
+    // the newest ReShade.log is the launcher's 30-second session and the game's
+    // own — the one with the crash — is ReShade.log1. Read that one when the
+    // newest log names a different exe and the older one names ours (#97).
+    let ours = st
+        .exe
+        .file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase());
+    let mut log_note = None;
+    if let (Some(rs), Some(ours), false) = (rs_log.as_deref(), ours.as_deref(), st.is32()) {
+        if let Some(loaded) = reshade_host_exe(rs).filter(|h| h.to_ascii_lowercase() != ours) {
+            if let Some(prev) = read(&consumer, "ReShade.log1")
+                .filter(|p| reshade_host_exe(p).is_some_and(|h| h.to_ascii_lowercase() == ours))
+            {
+                log_note = Some(ok(format!(
+                    "ReShade.log is {loaded}'s session (a launcher in the game folder loads \
+                     dxgi.dll too, and it ran last); the game's own session is ReShade.log1, \
+                     which is what the findings below read."
+                )));
+                rs_log = Some(prev);
+            }
+        }
+    }
+    out.extend(log_note);
     // Wine and Proton substitute their own d3dcompiler_47.dll, whose HLSL
     // compiler is vkd3d-shader. It does not implement every attribute ReShade
     // emits, and says so in its own words (#70).
@@ -1264,6 +1288,42 @@ mod tests {
         let f = diagnose(&game::inspect(&exe).unwrap());
         assert!(
             f.iter().any(|x| x.text.starts_with("Neural rendering ran")),
+            "{f:?}"
+        );
+    }
+
+    /// RDR2 (#97): Launcher.exe in the game folder loads dxgi.dll after the
+    /// game exits, so ReShade.log is the launcher's and the game's session is
+    /// ReShade.log1. Diagnose read the launcher's log and reported the add-on
+    /// missing and no NGX call, then told the user to install for Launcher.exe.
+    #[test]
+    fn launcher_log_on_top_falls_back_to_the_games_log1() {
+        let (t, exe) = setup(false);
+        let d = t.path();
+        fs::write(d.join(game::DLSS5_ADDON), b"a").unwrap();
+        fs::write(
+            d.join("ReShade.log"),
+            "Initializing crosire's ReShade version '6.8.0' (64-bit) loaded from 'D:\\g\\dxgi.dll' into 'D:\\g\\Launcher.exe' (0x1) ...\n",
+        )
+        .unwrap();
+        fs::write(
+            d.join("ReShade.log1"),
+            "Initializing crosire's ReShade version '6.8.0' (64-bit) loaded from 'D:\\g\\dxgi.dll' into 'D:\\g\\game.exe' (0x1) ...\n\
+             Registered add-on \"DLSS 5 Neural Rendering\"\n",
+        )
+        .unwrap();
+        let f = diagnose(&game::inspect(&exe).unwrap());
+        assert!(f.iter().any(|x| x.text.contains("ReShade.log1")), "{f:?}");
+        assert!(
+            f.iter().any(|x| x.text.contains("add-on registered")),
+            "{f:?}"
+        );
+        assert!(
+            !f.iter().any(|x| x.text.contains("never registered")),
+            "{f:?}"
+        );
+        assert!(
+            !f.iter().any(|x| x.text.contains("different executables")),
             "{f:?}"
         );
     }
