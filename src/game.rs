@@ -198,6 +198,68 @@ impl Api {
     }
 }
 
+/// The head of a PE file through the end of the section that holds its
+/// import directory — everything `pe_imports` and `pe_import_fns` index,
+/// as a prefix so their file offsets stay valid. Crimson Desert's exe is
+/// 358 MB and reading all of it, then twelve engine DLLs the same way,
+/// froze the window for a minute on clicking the game; the import section
+/// ends a few tens of MB in.
+fn pe_import_prefix(exe: &Path) -> Option<Vec<u8>> {
+    let mut f = fs::File::open(exe).ok()?;
+    let len = f.metadata().ok()?.len() as usize;
+    let mut head = vec![0u8; len.min(64 * 1024)];
+    f.read_exact(&mut head).ok()?;
+    let rd32 = |o: usize| -> Option<u32> {
+        head.get(o..o + 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    let rd16 =
+        |o: usize| -> Option<u16> { head.get(o..o + 2).map(|b| u16::from_le_bytes([b[0], b[1]])) };
+    let end = (|| -> Option<usize> {
+        if head.get(..2)? != b"MZ" {
+            return None;
+        }
+        let pe = rd32(0x3C)? as usize;
+        if head.get(pe..pe + 4)? != b"PE\0\0" {
+            return None;
+        }
+        let coff = pe + 4;
+        let nsec = rd16(coff + 2)? as usize;
+        let opt_size = rd16(coff + 16)? as usize;
+        let opt = coff + 20;
+        let dd_off = match rd16(opt)? {
+            0x20B => 112,
+            0x10B => 96,
+            _ => return None,
+        };
+        let import_rva = rd32(opt + dd_off + 8)? as usize;
+        if import_rva == 0 {
+            return Some(head.len());
+        }
+        let sec = opt + opt_size;
+        (0..nsec).find_map(|i| {
+            let s = sec + i * 40;
+            let (va, size, raw, raw_size) = (
+                rd32(s + 12)? as usize,
+                rd32(s + 16)? as usize,
+                rd32(s + 20)? as usize,
+                rd32(s + 8)? as usize,
+            );
+            (import_rva >= va && import_rva < va + size).then_some(raw + raw_size.max(size))
+        })
+    })()?;
+    let end = end.min(len);
+    if end <= head.len() {
+        head.truncate(end);
+        return Some(head);
+    }
+    let mut data = head;
+    data.resize(end, 0);
+    f.seek(SeekFrom::Start(64 * 1024)).ok()?;
+    f.read_exact(&mut data[64 * 1024..]).ok()?;
+    Some(data)
+}
+
 /// Lower-cased DLL names from the exe's static import table. Empty on any parse problem.
 /// Every function name the PE imports from `dll` (lowercased).
 ///
@@ -206,7 +268,7 @@ impl Api {
 /// alone and render with something far newer, which is how RDR2 read as
 /// DirectX 9 (#53). A real D3D9 renderer calls `Direct3DCreate9`.
 pub fn pe_import_fns(exe: &Path, dll: &str) -> Vec<String> {
-    let Ok(data) = fs::read(exe) else {
+    let Some(data) = pe_import_prefix(exe) else {
         return vec![];
     };
     let rd32 = |o: usize| -> Option<u32> {
@@ -313,7 +375,7 @@ pub fn pe_import_fns(exe: &Path, dll: &str) -> Vec<String> {
 }
 
 pub fn pe_imports(exe: &Path) -> Vec<String> {
-    let Ok(data) = fs::read(exe) else {
+    let Some(data) = pe_import_prefix(exe) else {
         return vec![];
     };
     let rd32 = |o: usize| -> Option<u32> {
@@ -557,6 +619,18 @@ fn dll_mentions_dgvoodoo(b: &[u8]) -> bool {
 /// GameGuard `tools/GGSetup.exe` or a `GameGuard` folder, EA Javelin an
 /// `EAAntiCheat` folder or `EAAntiCheat.GameServiceLauncher.exe/.dll` beside
 /// the exe.
+/// A folder with thousands of entries is an asset store (extracted game
+/// archives, a texture dump), never where a DLL, an anti-cheat, or an exe
+/// lives. Crimson Desert's bin64 carried 318,000 files in two such folders
+/// and every walk here crossed them; clicking the game froze the window for
+/// a minute. Counting stops at the cap, so the check itself stays cheap.
+pub fn huge_dir(d: &Path) -> bool {
+    const CAP: usize = 2000;
+    fs::read_dir(d)
+        .map(|rd| rd.take(CAP + 1).count() > CAP)
+        .unwrap_or(false)
+}
+
 pub fn detect_anticheat(game_dir: &Path) -> Option<&'static str> {
     fn walk(d: &Path, depth: u8) -> Option<&'static str> {
         let rd = fs::read_dir(d).ok()?;
@@ -583,7 +657,7 @@ pub fn detect_anticheat(game_dir: &Path) -> Option<&'static str> {
                 if n == "eaanticheat" {
                     return Some("EA Javelin Anticheat");
                 }
-                if depth > 0 {
+                if depth > 0 && !huge_dir(&p) {
                     if let Some(hit) = walk(&p, depth - 1) {
                         return Some(hit);
                     }
@@ -662,7 +736,7 @@ pub fn game_ships_dlss(game_dir: &Path) -> bool {
                 {
                     return true;
                 }
-            } else if depth > 0 && p.is_dir() && walk(&p, depth - 1) {
+            } else if depth > 0 && p.is_dir() && !huge_dir(&p) && walk(&p, depth - 1) {
                 return true;
             }
         }
@@ -763,7 +837,12 @@ pub fn rt_likely(game_dir: &Path) -> bool {
             {
                 return true;
             }
-            if depth > 0 && p.is_dir() && !n.starts_with('.') && walk_names(&p, depth - 1) {
+            if depth > 0
+                && p.is_dir()
+                && !n.starts_with('.')
+                && !huge_dir(&p)
+                && walk_names(&p, depth - 1)
+            {
                 return true;
             }
         }
@@ -1063,7 +1142,7 @@ fn game_pass_ships_dlss(content: &Path) -> bool {
                 {
                     return true;
                 }
-            } else if depth > 0 && p.is_dir() && walk(&p, depth - 1) {
+            } else if depth > 0 && p.is_dir() && !huge_dir(&p) && walk(&p, depth - 1) {
                 return true;
             }
         }
@@ -1302,7 +1381,7 @@ pub fn find_game_exes(dir: &Path) -> Vec<PathBuf> {
         for sub in rd
             .flatten()
             .map(|e| e.path())
-            .filter(|p| p.is_dir() && !skip(p))
+            .filter(|p| p.is_dir() && !skip(p) && !huge_dir(p))
         {
             out(&sub);
             walk(&sub, depth - 1, skip, out);
@@ -2393,5 +2472,25 @@ mod tests {
         let exe2 = testutil::make_pe(&t2.path().join("game.exe"), PE_X64);
         std::env::set_var("DLSS5ONECLICK_SKIP_GPU_CHECK", "1");
         assert!(inspect(&exe2).is_ok());
+    }
+
+    /// A folder of thousands of entries is skipped by every walk; the exe,
+    /// the DLLs and the anti-cheat markers beside it are still found.
+    #[test]
+    fn huge_folders_are_not_walked() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path();
+        let dump = d.join("paz_decrypted");
+        fs::create_dir_all(dump.join("deep")).unwrap();
+        for i in 0..2100 {
+            fs::write(dump.join(format!("{i}.bin")), b"x").unwrap();
+        }
+        assert!(huge_dir(&dump));
+        assert!(!huge_dir(d));
+        // Markers hidden inside the dump are not seen; beside the exe they are.
+        fs::write(dump.join("deep").join(DLSS_DLL), b"x").unwrap();
+        assert!(!game_ships_dlss(d));
+        fs::write(d.join(DLSS_DLL), b"x").unwrap();
+        assert!(game_ships_dlss(d));
     }
 }
