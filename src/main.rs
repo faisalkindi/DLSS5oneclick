@@ -23,7 +23,7 @@ mod update;
 use std::io::Write;
 use std::path::PathBuf;
 
-/// `dlss5oneclick <GAME.exe | game folder> [--remove | --remove-all | --check | --diagnose | --report | --engine=opti|aio | --renodx | --upstream | --imports | --ignore-anticheat | --mode=feeder|native | --api=dx11|dx12] | --update` runs headless; no args opens the GUI.
+/// `dlss5oneclick <GAME.exe | game folder> [--remove | --remove-all | --check | --diagnose | --report | --engine=opti|aio | --renodx | --upstream | --imports | --ignore-anticheat | --mode=feeder|native | --api=dx11|dx12 | --addon=latest|4.55|<tag>] | --update` runs headless; no args opens the GUI.
 /// Read by the NVIDIA and AMD drivers from this exe's export table to choose
 /// the discrete GPU for the whole process. Exported by the linker flags in
 /// build.rs; the values themselves are what the drivers read (#32).
@@ -154,6 +154,15 @@ error: {e:#}"
             eprintln!("error: --mode must be feeder or native");
             std::process::exit(1);
         }
+    }
+    if let Some(a) = args.iter().find_map(|a| a.strip_prefix("--addon=")) {
+        // "latest" lifts the 4.70 default; a bare number becomes a tag.
+        let v = if a.eq_ignore_ascii_case("latest") || a.starts_with("renodx-dlss5-") {
+            a.to_owned()
+        } else {
+            format!("renodx-dlss5-{a}")
+        };
+        std::env::set_var(installer::RENODX_TAG_ENV, v);
     }
     if let Some(a) = args.iter().find_map(|a| a.strip_prefix("--api=")) {
         std::env::set_var(game::API_ENV, a);

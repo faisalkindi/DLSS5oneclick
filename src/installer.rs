@@ -1284,8 +1284,30 @@ fn best_tag(mut cands: Vec<(Vec<u64>, String, String)>) -> (String, String) {
 
 /// rhi-repo lookup that never needs the API: HTML releases pages for the tag,
 /// the expanded-assets fragment for the file.
-/// Tag of the DLSS 5 add-on build to install; unset means the newest one.
+/// Tag of the DLSS 5 add-on build to install. Unset means the default build;
+/// `latest` means whatever rhi-repo lists newest; anything else is a tag.
 pub const RENODX_TAG_ENV: &str = "DLSS5ONECLICK_RENODX_TAG";
+
+/// The build installed when nothing else is asked for. 5.2.1 went live on
+/// rhi-repo on September 11 and within three days four games came back
+/// broken on it — Dragon's Dogma 2 crashing at the first evaluate (4.55 ran,
+/// an A/B on the same folder, #96), RDR2 with blown-out colour (#86), Elden
+/// Ring under Proton white (#76), Lunar Eclipse flashing (#100) — where the
+/// build before it, 4.70, was the one every reporter had working. So 4.70 is
+/// the default and the newest build is the opt-in.
+pub const RENODX_DEFAULT_TAG: &str = "renodx-dlss5-4.70";
+/// The env value that asks for the newest build instead of the default.
+pub const RENODX_LATEST: &str = "latest";
+
+/// What `DLSS5ONECLICK_RENODX_TAG` resolves to: `Some(tag)` to pin, `None`
+/// for the newest build.
+pub fn renodx_tag_choice(env: Option<&str>) -> Option<String> {
+    match env.map(str::trim) {
+        None | Some("") => Some(RENODX_DEFAULT_TAG.to_owned()),
+        Some(v) if v.eq_ignore_ascii_case(RENODX_LATEST) => None,
+        Some(v) => Some(v.to_owned()),
+    }
+}
 
 /// The classic-engine add-on. The Feeder's own host measured v4.7 to fault
 /// inside the driver's NGX runtime on NVIDIA 616.64 — an access violation in
@@ -1298,10 +1320,7 @@ fn rhi_pinned(client: &Client, prefix: &str) -> Option<Result<(String, String)>>
     if prefix != "renodx-dlss5-" {
         return None;
     }
-    let tag = std::env::var(RENODX_TAG_ENV).ok()?;
-    if tag.is_empty() {
-        return None;
-    }
+    let tag = renodx_tag_choice(std::env::var(RENODX_TAG_ENV).ok().as_deref())?;
     Some(
         net::github_asset_url_html(client, RHI_REPO, &tag, r#"[^"]+\.zip"#)
             .map(|url| (tag.clone(), url))
@@ -4575,5 +4594,22 @@ RestoreComputeSignature=true
         assert!(hinted.contains(r"C:\Program Files\Game"), "{hinted}");
         let plain = access_denied_hint("no release found", d);
         assert_eq!(plain, "no release found");
+    }
+
+    /// 4.70 unless asked otherwise: unset and empty pin the default, "latest"
+    /// lifts the pin, anything else is a tag of its own.
+    #[test]
+    fn renodx_default_is_4_70_and_latest_is_the_opt_in() {
+        assert_eq!(renodx_tag_choice(None).as_deref(), Some(RENODX_DEFAULT_TAG));
+        assert_eq!(
+            renodx_tag_choice(Some("")).as_deref(),
+            Some(RENODX_DEFAULT_TAG)
+        );
+        assert_eq!(renodx_tag_choice(Some("latest")), None);
+        assert_eq!(renodx_tag_choice(Some(" Latest ")), None);
+        assert_eq!(
+            renodx_tag_choice(Some(RENODX_CLASSIC_TAG)).as_deref(),
+            Some(RENODX_CLASSIC_TAG)
+        );
     }
 }

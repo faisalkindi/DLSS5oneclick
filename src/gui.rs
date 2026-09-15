@@ -94,6 +94,8 @@ pub struct App {
     /// ReShade route: pin the classic DLSS 5 add-on build, which the Feeder's
     /// host measured to work on NVIDIA 616.64 where the current one faults (#69).
     renodx_classic: bool,
+    /// Ask for the newest DLSS 5 add-on build instead of the default 4.70.
+    renodx_newest: bool,
     /// OptiScaler route, RTX 40 only: the fork's built-in MFG unlock (#83).
     ada_mfg: bool,
     /// OptiScaler route, D3D12, any RTX: FSR 3.1 frame generation (2X).
@@ -247,6 +249,7 @@ impl App {
             upstream_preset: 3,
             opti_presr: false,
             renodx_classic: false,
+            renodx_newest: false,
             ada_mfg: false,
             opti_fg: false,
             renodx: RenodxLookup::Idle,
@@ -442,6 +445,8 @@ impl App {
         }
         if self.renodx_classic {
             std::env::set_var(installer::RENODX_TAG_ENV, installer::RENODX_CLASSIC_TAG);
+        } else if self.renodx_newest {
+            std::env::set_var(installer::RENODX_TAG_ENV, installer::RENODX_LATEST);
         } else {
             std::env::remove_var(installer::RENODX_TAG_ENV);
         }
@@ -2885,6 +2890,23 @@ impl eframe::App for App {
                     );
                     if ui.add_enabled(!self.running, cb).changed() {
                         self.renodx_classic = on;
+                    }
+                    // The default is 4.70; the newest rhi-repo build is the
+                    // opt-in since 5.2.1 broke four games in three days.
+                    let mut newest = self.renodx_newest;
+                    let cb = egui::Checkbox::new(
+                        &mut newest,
+                        RichText::new(
+                            "Try the newest add-on build (5.2.1 or later) instead of the default 4.70 \u{2014} multi-pass sliders, new colour codec; crashes or blown-out colours reported in some games",
+                        )
+                        .font(t::plex(11.5))
+                        .color(t::TEXT_SOFT),
+                    );
+                    if ui
+                        .add_enabled(!self.running && !self.renodx_classic, cb)
+                        .changed()
+                    {
+                        self.renodx_newest = newest;
                     }
                 }
                 // RTX 40 multi-frame generation on the ReShade route: a single
