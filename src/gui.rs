@@ -341,6 +341,22 @@ impl App {
             // does not silently drop it (#83). Remove takes the file away, and
             // the tick follows it.
             self.ada_mfg = matches!(&self.status, Some(Ok(s)) if s.mfg);
+            // Same for the add-on build ticks: the tag recorded beside the
+            // add-on says which build is in, so the ticks come back the way
+            // the last Install left them instead of clearing on every
+            // reselect (#101).
+            let tag = self
+                .status
+                .as_ref()
+                .and_then(|r| r.as_ref().ok())
+                .and_then(|s| {
+                    std::fs::read_to_string(s.consumer_dir().join(game::DLSS5_ADDON_MARKER)).ok()
+                })
+                .map(|t| t.trim().to_owned());
+            self.renodx_classic = tag.as_deref() == Some(installer::RENODX_CLASSIC_TAG);
+            self.renodx_newest = tag.as_deref().is_some_and(|t| {
+                t != installer::RENODX_CLASSIC_TAG && t != installer::RENODX_DEFAULT_TAG
+            });
             self.start_renodx_lookup();
         }
         self.reload_knobs_and_perf();
@@ -1125,7 +1141,17 @@ fn engine_card(
         "UNAVAILABLE"
     };
     let pill_font = t::plex_semibold(10.0);
-    let galley = painter.layout_no_wrap(pill_text.to_owned(), pill_font, t::BG);
+    // The colour is baked into the galley at layout time; the one passed to
+    // painter.galley() is only a fallback. Laying out in BG and "recolouring"
+    // later drew CHOOSE in the background colour on every build so far (#77).
+    let pill_color = if selected {
+        t::BG
+    } else if enabled {
+        t::TEXT_SOFT
+    } else {
+        t::TEXT_DIM
+    };
+    let galley = painter.layout_no_wrap(pill_text.to_owned(), pill_font, pill_color);
     let pill = egui::Rect::from_min_size(
         egui::pos2(rect.right() - galley.size().x - 32.0, rect.top() + 12.0),
         galley.size() + Vec2::new(20.0, 8.0),
@@ -2981,9 +3007,12 @@ impl eframe::App for App {
                     // Three cards on one row when the window is wide enough
                     // for their text; a full-width third card below otherwise.
                     // The wide card left half the row empty (#77).
-                    let three_up = row_w >= 1100.0;
+                    // Each card needs about 480 px for its two lines beside
+                    // the pill; at 1172 px three-up wrapped the third card's
+                    // text past its bottom edge (#77).
+                    let three_up = row_w >= 1500.0;
                     let cols = if three_up { 3.0 } else { 2.0 };
-                    let card_h = if three_up { 88.0 } else { 74.0 };
+                    let card_h = 74.0;
                     let col_w = ((row_w - gap * (cols - 1.0)) / cols).floor();
                     let (row_rect, _) =
                         ui.allocate_exact_size(Vec2::new(row_w, card_h), egui::Sense::hover());
@@ -3024,9 +3053,12 @@ impl eframe::App for App {
                             Vec2::new(col_w, card_h),
                         )
                     } else {
+                        // Half width like the two above it: a full-width third
+                        // card was mostly empty (#77).
                         ui.add_space(gap);
-                        ui.allocate_exact_size(Vec2::new(row_w, card_h), egui::Sense::hover())
-                            .0
+                        let (r, _) = ui
+                            .allocate_exact_size(Vec2::new(row_w, card_h), egui::Sense::hover());
+                        egui::Rect::from_min_size(r.min, Vec2::new(col_w, card_h))
                     };
                     if engine_card(
                         ui,
