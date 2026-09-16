@@ -40,6 +40,15 @@ pub struct Mod {
 }
 
 impl Mod {
+    /// Who publishes the file about to be downloaded, shown before it is.
+    pub fn source_label(&self) -> String {
+        match self.url.as_deref() {
+            Some(u) if u.starts_with(SNAPSHOT_DOWNLOAD) => "clshortfuse snapshot build".to_owned(),
+            Some(u) => format!("{}'s fork", url_owner(u)),
+            None => "no download".to_owned(),
+        }
+    }
+
     pub fn status_label(&self) -> &'static str {
         match self.status {
             "stable" => "working",
@@ -115,6 +124,45 @@ pub struct WikiRow {
 }
 
 /// Parse the wiki's mod table (rows are `| Name | Maintainer | Links | Status |`).
+/// Where a wiki link may point before this tool will download from it: a
+/// RenoDX fork's own GitHub Pages (`https://<owner>.github.io/renodx/…`) or
+/// a fork's GitHub release (`https://github.com/<owner>/renodx/releases/download/…`),
+/// https only. The wiki is editable by accounts outside the project, and a
+/// link there used to be taken as-is and loaded into the game process (#102).
+/// Anything else falls back to the project's own snapshot build.
+pub fn wiki_host_allowed(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let host = host.to_ascii_lowercase();
+    let owner_ok =
+        |o: &str| !o.is_empty() && o.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if let Some(owner) = host.strip_suffix(".github.io") {
+        return owner_ok(owner) && path.starts_with("renodx/");
+    }
+    if host == "github.com" {
+        let mut parts = path.split('/');
+        let owner = parts.next().unwrap_or("");
+        return owner_ok(owner)
+            && parts.next() == Some("renodx")
+            && parts.next() == Some("releases")
+            && parts.next() == Some("download");
+    }
+    false
+}
+
+/// The owner a resolved URL belongs to, for showing before the download:
+/// `clshortfuse` for the project's own builds, the fork owner otherwise.
+pub fn url_owner(url: &str) -> String {
+    let rest = url.strip_prefix("https://").unwrap_or(url);
+    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+    if let Some(owner) = host.to_ascii_lowercase().strip_suffix(".github.io") {
+        return owner.to_owned();
+    }
+    path.split('/').next().unwrap_or("").to_owned()
+}
+
 pub fn parse_wiki(md: &str) -> Vec<WikiRow> {
     let re_url = Regex::new(r"\((https?://[^)\s]+\.addon64)\)").unwrap();
     let re_note = Regex::new(r#"\(# "([^"]+)"\)"#).unwrap();
@@ -216,9 +264,10 @@ pub fn resolve(index: &Value, wiki: &[WikiRow], game_dir: &Path, exe: &Path) -> 
             // Not every mod has index metadata (Dragon's Dogma 2 is wiki-only):
             // match the wiki row by folder / exe name and take its file.
             let wanted: Vec<String> = names.iter().map(|n| norm_title(n)).collect();
-            let r = wiki
-                .iter()
-                .find(|r| r.url.is_some() && wanted.contains(&norm_title(&r.title)))?;
+            let r = wiki.iter().find(|r| {
+                r.url.as_deref().is_some_and(wiki_host_allowed)
+                    && wanted.contains(&norm_title(&r.title))
+            })?;
             let u = r.url.as_deref()?;
             (r.title.clone(), net::file_name(u).to_owned())
         }
@@ -229,8 +278,13 @@ pub fn resolve(index: &Value, wiki: &[WikiRow], game_dir: &Path, exe: &Path) -> 
         Some(r) => {
             // The wiki link (often a maintainer fork) wins; a Nexus/Discord-only
             // row still installs the main-repo snapshot build, and says so.
-            let (url, file, note) = match &r.url {
-                Some(u) => (u.clone(), net::file_name(u).to_owned(), r.note.clone()),
+            let (url, file, note) = match r.url.as_deref().filter(|u| wiki_host_allowed(u)) {
+                Some(u) => (u.to_owned(), net::file_name(u).to_owned(), r.note.clone()),
+                None if r.url.is_some() => (
+                    format!("{SNAPSHOT_DOWNLOAD}{file}"),
+                    file,
+                    format!("{} The wiki's link points outside GitHub's renodx forks; the project's snapshot build is installed instead.", r.note).trim().to_owned(),
+                ),
                 None => (
                     format!("{SNAPSHOT_DOWNLOAD}{file}"),
                     file,
@@ -480,5 +534,60 @@ mod tests {
             foreign_mods(tmp.path(), Some("renodx-cp2077.addon64")),
             vec!["renodx-ff7rebirth.addon64".to_string()]
         );
+    }
+
+    /// The wiki is editable by outsiders; only GitHub renodx forks are
+    /// followed, https only, and anything else drops to the snapshot (#102).
+    #[test]
+    fn wiki_links_are_allowlisted() {
+        assert!(wiki_host_allowed(
+            "https://clshortfuse.github.io/renodx/renodx-x.addon64"
+        ));
+        assert!(wiki_host_allowed(
+            "https://Some-Fork.github.io/renodx/mods/renodx-x.addon64"
+        ));
+        assert!(wiki_host_allowed(
+            "https://github.com/someone/renodx/releases/download/v1/renodx-x.addon64"
+        ));
+        assert!(!wiki_host_allowed(
+            "http://clshortfuse.github.io/renodx/renodx-x.addon64"
+        ));
+        assert!(!wiki_host_allowed(
+            "https://evil.example/renodx/renodx-x.addon64"
+        ));
+        assert!(!wiki_host_allowed(
+            "https://evil.github.io/other/renodx-x.addon64"
+        ));
+        assert!(!wiki_host_allowed(
+            "https://github.com/someone/other/releases/download/v1/x.addon64"
+        ));
+        assert!(!wiki_host_allowed(
+            "https://github.com/someone/renodx/raw/main/x.addon64"
+        ));
+        assert!(!wiki_host_allowed(
+            "https://evil.github.io.example/renodx/x.addon64"
+        ));
+        assert_eq!(
+            url_owner("https://clshortfuse.github.io/renodx/a.addon64"),
+            "clshortfuse"
+        );
+        assert_eq!(
+            url_owner("https://github.com/fork/renodx/releases/download/v1/a.addon64"),
+            "fork"
+        );
+
+        let md = "| Atlas Fallen (DX12) | Akuru | [![Snapshot](x)](https://evil.example/renodx-atlasfallen.addon64) | [:white_check_mark:](# \"ok\") |\n";
+        let wiki = parse_wiki(md);
+        let ix = index();
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path().join("Atlas Fallen");
+        fs::create_dir(&d).unwrap();
+        let m = resolve(&ix, &wiki, &d, &d.join("AtlasFallen.exe")).unwrap();
+        assert_eq!(
+            m.url.as_deref(),
+            Some("https://github.com/clshortfuse/renodx/releases/download/snapshot/renodx-atlasfallen.addon64")
+        );
+        assert!(m.note.contains("outside GitHub"), "{}", m.note);
+        assert_eq!(m.source_label(), "clshortfuse snapshot build");
     }
 }

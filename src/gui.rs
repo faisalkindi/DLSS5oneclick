@@ -3403,7 +3403,7 @@ impl eframe::App for App {
                                 RenodxLookup::NotFound => dim(ui, "— no RenoDX mod is published for this game.".into()),
                                 RenodxLookup::Failed(e) => dim(ui, format!("— lookup failed: {e}")),
                                 RenodxLookup::Found(m) => {
-                                    let label = format!("Also install {} — {}", m.file, m.status_label());
+                                    let label = format!("Also install {} — {} — from {}", m.file, m.status_label(), m.source_label());
                                     let cb = egui::Checkbox::new(&mut self.renodx_on, RichText::new(label).font(t::plex(12.0)).color(t::TEXT_SOFT));
                                     ui.add_enabled(!self.running, cb).on_hover_text(
                                         "Game-specific HDR / tone-mapping mod from the RenoDX project. Loads beside the DLSS 5 add-on (different add-on name, different settings section). Turn Windows AutoHDR / RTX HDR off to avoid double tone mapping.",

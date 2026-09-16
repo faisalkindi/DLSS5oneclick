@@ -404,10 +404,11 @@ Attach that zip to the GitHub issue.",
                 }
                 match net::client().and_then(|c| renodx::lookup(&c, &exe)) {
                     Ok(Some(m)) => println!(
-                        "  RenoDX HDR mod available: {} -> {} ({}){}",
+                        "  RenoDX HDR mod available: {} -> {} ({}, from {}){}",
                         m.title,
                         m.file,
                         m.status_label(),
+                        m.source_label(),
                         if m.note.is_empty() {
                             String::new()
                         } else {
