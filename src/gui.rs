@@ -3067,7 +3067,7 @@ impl eframe::App for App {
                         aio_ok,
                         "ReShade + standalone AIO \u{00b7} experimental",
                         &[
-                            "kibblerz's all-in-one add-on: neural rendering, DLSS super resolution and frame generation, no Feeder.",
+                            "kibblerz's all-in-one: neural rendering, super resolution, frame generation.",
                             "In game: Home \u{2192} Add-ons \u{2192} Standalone DLSS-NR + SR. Windowed mode recommended.",
                         ],
                         if aio_ok {
