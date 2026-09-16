@@ -1795,6 +1795,25 @@ fn step_feeder(
     let url = net::github_asset_url_html(client, FEEDER_REPO, tag, r#"[^"]+\.zip"#)?;
     let zip_path = work.join("dlss5-feeder.zip");
     net::download(client, &url, &zip_path, "DLSS5-Feeder", progress)?;
+    // Fake copies of the Feeder are circulating (its author's
+    // CAREFUL_FAKE_MALICIOUS_FEEDER.txt, 1.16.0-beta.3). This tool only ever
+    // downloads from the author's own releases, and since beta.3 each release
+    // prints the zip's SHA-256 in its notes: when it does, the bytes on disk
+    // must match it, or nothing is installed.
+    if let Some(want) = net::release_note_sha256(client, FEEDER_REPO, tag) {
+        let have = net::sha256_file(&zip_path)?;
+        if have != want {
+            bail!(
+                "DLSS5-Feeder {tag}: the downloaded zip's SHA-256 ({have}) does not match the \
+                 one printed on its release page ({want}). Nothing was installed. Try again; \
+                 if it repeats, something between you and github.com is altering the file."
+            );
+        }
+        progress(
+            0,
+            &format!("DLSS5-Feeder {tag}: SHA-256 matches the release page"),
+        );
+    }
 
     let d = st.game_dir();
     let f = fs::File::open(&zip_path)?;

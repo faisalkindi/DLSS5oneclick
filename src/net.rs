@@ -159,6 +159,35 @@ pub fn latest_tag(client: &Client, repo: &str) -> Result<String> {
     })
 }
 
+/// SHA-256 of a file, lower-case hex.
+pub fn sha256_file(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut f = std::fs::File::open(path)?;
+    let mut h = Sha256::new();
+    std::io::copy(&mut f, &mut h)?;
+    Ok(format!("{:x}", h.finalize()))
+}
+
+/// The SHA-256 a release's notes print for its asset, when they print one:
+/// the first 64-hex-digit run in the body of `repo`'s release `tag`. `None`
+/// when the API cannot be reached or the notes carry no hash.
+pub fn release_note_sha256(client: &Client, repo: &str, tag: &str) -> Option<String> {
+    let body = get_json_github(
+        client,
+        &format!("https://api.github.com/repos/{repo}/releases/tags/{tag}"),
+    )
+    .ok()?;
+    let text = body.get("body")?.as_str()?;
+    sha256_in_text(text)
+}
+
+pub fn sha256_in_text(text: &str) -> Option<String> {
+    regex::Regex::new(r"\b[0-9A-Fa-f]{64}\b")
+        .unwrap()
+        .find(text)
+        .map(|m| m.as_str().to_ascii_lowercase())
+}
+
 /// Content-Length of `url` after redirects (GitHub's `latest/download` → CDN),
 /// or `None` when the server does not say.
 pub fn remote_len(client: &Client, url: &str) -> Result<Option<u64>> {
@@ -459,5 +488,22 @@ mod tests {
         });
         assert!(r.is_err());
         assert_eq!(m.get(), 1);
+    }
+
+    #[test]
+    fn release_note_hash_is_read_and_a_file_is_hashed() {
+        let body = "SHA-256 of `DLSS5-Feeder-1.16.0-beta.3.zip`: `0D1DEEBF531436A6D0914548E450A790AEFA53CB4E9F6DFDCD48AFF74831CB21`. The genuine";
+        assert_eq!(
+            super::sha256_in_text(body).as_deref(),
+            Some("0d1deebf531436a6d0914548e450a790aefa53cb4e9f6dfdcd48aff74831cb21")
+        );
+        assert_eq!(super::sha256_in_text("no hash here, just words"), None);
+        let t = tempfile::tempdir().unwrap();
+        let p = t.path().join("a.bin");
+        std::fs::write(&p, b"abc").unwrap();
+        assert_eq!(
+            super::sha256_file(&p).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 }
