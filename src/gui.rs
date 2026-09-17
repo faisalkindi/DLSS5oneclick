@@ -91,6 +91,10 @@ pub struct App {
     /// OptiScaler route: install wilsjo2's pre-SR multipass fork instead of
     /// Dagherbou's build (#72).
     opti_presr: bool,
+    /// RTX 20/30 multi-frame generation on the OptiScaler route: ShyVortex's
+    /// build with the Turing/Ampere unlock. Read back from the manifest's
+    /// repo line, so it follows the folder like the RTX 40 tick.
+    ampere_mfg: bool,
     /// ReShade route: pin the classic DLSS 5 add-on build, which the Feeder's
     /// host measured to work on NVIDIA 616.64 where the current one faults (#69).
     renodx_classic: bool,
@@ -248,6 +252,7 @@ impl App {
             upstream_on: false,
             upstream_preset: 3,
             opti_presr: false,
+            ampere_mfg: false,
             renodx_classic: false,
             renodx_newest: false,
             ada_mfg: false,
@@ -341,6 +346,15 @@ impl App {
             // does not silently drop it (#83). Remove takes the file away, and
             // the tick follows it.
             self.ada_mfg = matches!(&self.status, Some(Ok(s)) if s.mfg);
+            self.ampere_mfg = self
+                .status
+                .as_ref()
+                .and_then(|r| r.as_ref().ok())
+                .and_then(|s| std::fs::read_to_string(s.game_dir().join(game::OPTI_MANIFEST)).ok())
+                .is_some_and(|m| {
+                    m.lines()
+                        .any(|l| l.trim() == format!("# repo {}", installer::OPTI_UNLOCKED_REPO))
+                });
             // Same for the add-on build ticks: the tag recorded beside the
             // add-on says which build is in, so the ticks come back the way
             // the last Install left them instead of clearing on every
@@ -458,6 +472,11 @@ impl App {
             std::env::set_var(installer::OPTI_SOURCE_ENV, "presr");
         } else {
             std::env::remove_var(installer::OPTI_SOURCE_ENV);
+        }
+        if self.ampere_mfg {
+            std::env::set_var(installer::AMPERE_MFG_ENV, "1");
+        } else {
+            std::env::remove_var(installer::AMPERE_MFG_ENV);
         }
         if self.renodx_classic {
             std::env::set_var(installer::RENODX_TAG_ENV, installer::RENODX_CLASSIC_TAG);
@@ -3144,6 +3163,37 @@ impl eframe::App for App {
                         );
                         if ui.add_enabled(!self.running, cb).changed() {
                             self.ada_mfg = on;
+                        }
+                    }
+                    // RTX 20/30: the unlock lives in ShyVortex's build only, so
+                    // the tick swaps the build underneath rather than adding a
+                    // fourth choice to learn (#65).
+                    if ok_status
+                        .as_ref()
+                        .and_then(|s| s.gpu.as_ref())
+                        .is_some_and(|(_, t)| *t == crate::gpu::Tier::Rtx2030)
+                    {
+                        ui.add_space(6.0);
+                        let mut on = self.ampere_mfg;
+                        let cb = egui::Checkbox::new(
+                            &mut on,
+                            RichText::new(
+                                "Unlock multi-frame generation on this RTX 20/30 card (3X\u{2013}4X) \u{2014} the game must have DLSS frame generation of its own \u{00b7} experimental",
+                            )
+                            .font(t::plex(11.5))
+                            .color(t::TEXT_SOFT),
+                        );
+                        if ui.add_enabled(!self.running, cb).changed() {
+                            self.ampere_mfg = on;
+                        }
+                        if self.ampere_mfg {
+                            ui.label(
+                                RichText::new(
+                                    "Installs ShyVortex's OptiScaler build (wilsjo2's pre-SR fork plus sdli1995's Turing/Ampere unlock and the Streamline runtime) in place of the build above. One report of it failing on Forza Horizon 6 on RTX 20.",
+                                )
+                                .font(t::plex(11.0))
+                                .color(t::TEXT_DIM),
+                            );
                         }
                     }
                     // OptiScaler's own frame generation, any RTX card. The FSR

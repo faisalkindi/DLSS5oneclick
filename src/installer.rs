@@ -325,6 +325,7 @@ pub struct Latest {
     /// wilsjo2's pre-SR fork numbers its releases on its own, so its newest tag
     /// has to be carried separately from the stable build's.
     pub opti_presr: Option<String>,
+    pub opti_unlocked: Option<String>,
     pub dlss: Option<String>,
     pub dlssnr: Option<String>,
     pub aio: Option<String>,
@@ -337,6 +338,7 @@ impl Latest {
             feeder: net::latest_tag(client, FEEDER_REPO).ok(),
             opti: net::latest_tag(client, OPTI_REPO).ok(),
             opti_presr: net::latest_tag(client, OPTI_PRESR_REPO).ok(),
+            opti_unlocked: net::latest_tag(client, OPTI_UNLOCKED_REPO).ok(),
             // Same source order as the install: NVIDIA's tag, else the mirror's.
             dlss: nvidia_dll(client, game::DLSS_DLL)
                 .map(|(t, _)| t)
@@ -456,6 +458,7 @@ pub fn stale_components(dir: &Path, latest: &Latest) -> Vec<String> {
         // stable build's tags all end in "-dlssnr", which tells them apart.
         let want = match manifest_repo(&m) {
             Some(r) if r == OPTI_PRESR_REPO => &latest.opti_presr,
+            Some(r) if r == OPTI_UNLOCKED_REPO => &latest.opti_unlocked,
             Some(_) => &latest.opti,
             None if manifest_tag(&m).is_some_and(|t| !t.ends_with("-dlssnr")) => &latest.opti_presr,
             None => &latest.opti,
@@ -707,6 +710,17 @@ fn patch_opti_ini(st: &GameStatus, d: &Path) -> Result<()> {
         if let Some(patched) = set_ini_key(&cur, "DLSSG", "AdaMfgUnlock", ada_mfg()) {
             cur = patched;
         }
+        // The Turing/Ampere unlock exists only in ShyVortex's build, where it
+        // ships defaulted to true; write it either way so an untick turns it
+        // off, and so the other builds carry a key nothing reads, harmlessly.
+        if let Some(patched) = set_ini_key(
+            &cur,
+            "DLSSG",
+            "AmpereMfgUnlock",
+            if ampere_mfg() { "true" } else { "false" },
+        ) {
+            cur = patched;
+        }
         // OptiScaler's own frame generation: FSR 3.1 interpolation over the
         // upscaler it already runs, 2X, on any RTX card. Every library it
         // needs ships in the package, so it is four keys. D3D12 only — every
@@ -824,8 +838,24 @@ pub const OPTI_REPO: &str = "Dagherbou/OptiScaler_DLSSNR";
 /// it installs through the same step (#72).
 pub const OPTI_PRESR_REPO: &str = "wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass";
 
+/// ShyVortex's fork of wilsjo2's: the same build plus sdli1995's Turing/Ampere
+/// multi-frame-generation unlock (`dlssg_sm86`) sideloaded by an
+/// `AmpereMfgUnlock` key, and the Streamline runtime it needs. Same zip layout,
+/// so it installs through the same step. Only ever selected by the RTX 20/30
+/// MFG tick; nobody picks it by name.
+pub const OPTI_UNLOCKED_REPO: &str = "ShyVortex/OptiScaler-DLSSNR-PreSR-Multipass";
+
 /// Which OptiScaler build to install; unset means Dagherbou's.
 pub const OPTI_SOURCE_ENV: &str = "DLSS5ONECLICK_OPTI_SOURCE";
+
+/// Set when the RTX 20/30 multi-frame-generation tick is on: the build
+/// becomes ShyVortex's whatever else was chosen, and the ini gets
+/// `[DLSSG] AmpereMfgUnlock=true`.
+pub const AMPERE_MFG_ENV: &str = "DLSS5ONECLICK_AMPERE_MFG";
+
+pub fn ampere_mfg() -> bool {
+    std::env::var_os(AMPERE_MFG_ENV).is_some()
+}
 
 /// True when the pre-SR multipass fork was asked for.
 pub fn opti_presr() -> bool {
@@ -833,7 +863,9 @@ pub fn opti_presr() -> bool {
 }
 
 pub fn opti_repo() -> &'static str {
-    if opti_presr() {
+    if ampere_mfg() {
+        OPTI_UNLOCKED_REPO
+    } else if opti_presr() {
         OPTI_PRESR_REPO
     } else {
         OPTI_REPO
@@ -1057,27 +1089,65 @@ pub fn set_dlss_nr_enabled(ini: &str) -> Option<String> {
 /// OptiScaler.ini repeats names like `Enabled` under many headings.
 pub fn set_ini_key(ini: &str, section: &str, key: &str, value: &str) -> Option<String> {
     let header = format!("[{section}]");
+    let lines: Vec<&str> = ini.split_inclusive('\n').collect();
     let mut out = String::with_capacity(ini.len() + 32);
     let mut in_section = false;
     let mut seen = false;
     let mut changed = false;
-    for line in ini.split_inclusive('\n') {
+    // Where the wanted section's last key line ends, so a missing key is
+    // added inside it. Appending a second [DLSSG] block at the end left the
+    // key in a duplicate section OptiScaler may not read (RTX 20/30 MFG).
+    let mut section_end: Option<usize> = None;
+    // Only the first occurrence of the section is a target for insertion:
+    // older versions of this tool appended duplicate blocks, and the real
+    // section is the one OptiScaler ships and reads.
+    let mut in_first = false;
+    let mut header_seen = false;
+    for (i, line) in lines.iter().enumerate() {
         let raw = line.trim_end_matches(['\r', '\n']);
         let t = raw.trim();
         if t.starts_with('[') {
             in_section = t.eq_ignore_ascii_case(&header);
-        } else if in_section && t.split('=').next().unwrap_or("").trim() == key {
-            seen = true;
-            if t.split('=').nth(1).map(str::trim) != Some(value) {
-                out.push_str(&format!("{key}={value}"));
-                out.push_str(&line[raw.len()..]);
-                changed = true;
-                continue;
+            in_first = in_section && !header_seen;
+            if in_section {
+                header_seen = true;
+            }
+            if in_first {
+                section_end = Some(i);
+            }
+        } else if in_section {
+            if in_first && !t.is_empty() && !t.starts_with(';') {
+                section_end = Some(i);
+            }
+            if t.split('=').next().unwrap_or("").trim() == key {
+                seen = true;
+                if t.split('=').nth(1).map(str::trim) != Some(value) {
+                    out.push_str(&format!("{key}={value}"));
+                    out.push_str(&line[raw.len()..]);
+                    changed = true;
+                    continue;
+                }
             }
         }
         out.push_str(line);
     }
     if !seen {
+        if let Some(end) = section_end {
+            // Rebuild with the key inserted right after the section's last
+            // key line (or its header, when it has none).
+            let eol = if ini.contains("\r\n") { "\r\n" } else { "\n" };
+            let mut rebuilt = String::with_capacity(ini.len() + 32);
+            for (i, line) in lines.iter().enumerate() {
+                rebuilt.push_str(line);
+                if i == end {
+                    if !line.ends_with('\n') {
+                        rebuilt.push_str(eol);
+                    }
+                    rebuilt.push_str(&format!("{key}={value}{eol}"));
+                }
+            }
+            return Some(rebuilt);
+        }
         if !out.is_empty() && !out.ends_with('\n') {
             out.push('\n');
         }
@@ -3248,6 +3318,13 @@ mod tests {
         assert_eq!(opti_repo(), OPTI_PRESR_REPO);
         std::env::set_var(OPTI_SOURCE_ENV, "something else");
         assert_eq!(opti_repo(), OPTI_REPO);
+        // The RTX 20/30 MFG tick wins over the build choice: the unlock only
+        // exists in ShyVortex's build.
+        std::env::set_var(AMPERE_MFG_ENV, "1");
+        assert_eq!(opti_repo(), OPTI_UNLOCKED_REPO);
+        std::env::set_var(OPTI_SOURCE_ENV, "presr");
+        assert_eq!(opti_repo(), OPTI_UNLOCKED_REPO);
+        std::env::remove_var(AMPERE_MFG_ENV);
         std::env::remove_var(OPTI_SOURCE_ENV);
     }
 
@@ -4192,6 +4269,7 @@ RestoreComputeSignature=true
             feeder: Some("v0.13.1-beta.1".into()),
             opti: Some("v0.2.0-dlssnr".into()),
             opti_presr: Some("v0.7.7".into()),
+            opti_unlocked: None,
             dlss: Some("dlss-310.9.0".into()),
             dlssnr: Some("dlssnr-310.8.SF-v2".into()),
             aio: None,
@@ -4234,6 +4312,7 @@ RestoreComputeSignature=true
             feeder: None,
             opti: Some("v0.2.0-dlssnr".into()),
             opti_presr: Some("v0.7.7".into()),
+            opti_unlocked: None,
             dlss: None,
             dlssnr: None,
             aio: None,
@@ -4629,6 +4708,44 @@ RestoreComputeSignature=true
         assert_eq!(
             renodx_tag_choice(Some(RENODX_CLASSIC_TAG)).as_deref(),
             Some(RENODX_CLASSIC_TAG)
+        );
+    }
+
+    /// A key missing from a section that exists goes into that section, not
+    /// into a duplicate [section] appended at the end.
+    #[test]
+    fn set_ini_key_adds_a_missing_key_inside_the_existing_section() {
+        let ini = "[DLSSG]\n; comment\nInterpolationCount=auto\n\n[Other]\nX=1\n";
+        let out = set_ini_key(ini, "DLSSG", "AmpereMfgUnlock", "true").unwrap();
+        assert_eq!(
+            out,
+            "[DLSSG]\n; comment\nInterpolationCount=auto\nAmpereMfgUnlock=true\n\n[Other]\nX=1\n"
+        );
+        assert_eq!(out.matches("[DLSSG]").count(), 1);
+        // Second write of the same value: no change.
+        assert!(set_ini_key(&out, "DLSSG", "AmpereMfgUnlock", "true").is_none());
+        // Change of value edits in place.
+        let off = set_ini_key(&out, "DLSSG", "AmpereMfgUnlock", "false").unwrap();
+        assert!(off.contains("AmpereMfgUnlock=false") && !off.contains("AmpereMfgUnlock=true"));
+        // A legacy duplicate block at the end does not attract the key.
+        let legacy = "[DLSSG]
+InterpolationCount=auto
+
+[Other]
+X=1
+
+[DLSSG]
+AdaMfgUnlock=false
+";
+        let out = set_ini_key(legacy, "DLSSG", "AmpereMfgUnlock", "true").unwrap();
+        assert!(
+            out.starts_with(
+                "[DLSSG]
+InterpolationCount=auto
+AmpereMfgUnlock=true
+"
+            ),
+            "{out}"
         );
     }
 }

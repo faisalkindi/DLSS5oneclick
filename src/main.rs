@@ -23,7 +23,7 @@ mod update;
 use std::io::Write;
 use std::path::PathBuf;
 
-/// `dlss5oneclick <GAME.exe | game folder> [--remove | --remove-all | --check | --diagnose | --report | --engine=opti|aio | --renodx | --upstream | --imports | --ignore-anticheat | --mode=feeder|native | --api=dx11|dx12 | --addon=latest|4.55|<tag>] | --update` runs headless; no args opens the GUI.
+/// `dlss5oneclick <GAME.exe | game folder> [--remove | --remove-all | --check | --diagnose | --report | --engine=opti|aio | --renodx | --upstream | --imports | --ignore-anticheat | --mode=feeder|native | --api=dx11|dx12 | --addon=latest|4.55|<tag> | --ampere-mfg] | --update` runs headless; no args opens the GUI.
 /// Read by the NVIDIA and AMD drivers from this exe's export table to choose
 /// the discrete GPU for the whole process. Exported by the linker flags in
 /// build.rs; the values themselves are what the drivers read (#32).
@@ -144,6 +144,9 @@ error: {e:#}"
                 std::process::exit(1);
             }
         }
+    }
+    if args.iter().any(|a| a == "--ampere-mfg") {
+        std::env::set_var(installer::AMPERE_MFG_ENV, "1");
     }
     if args.iter().any(|a| a == "--ignore-anticheat") {
         game::set_ignore_anticheat(true);
