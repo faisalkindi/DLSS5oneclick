@@ -1126,6 +1126,15 @@ pub fn game_pass_content_dir(d: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
+/// Whether a file can be created in `d`: the one test that separates a
+/// protected Store install from one that takes mods.
+fn dir_writable(d: &Path) -> bool {
+    let probe = d.join(".dlss5oneclick-write-probe");
+    let ok = fs::write(&probe, b"").is_ok();
+    let _ = fs::remove_file(&probe);
+    ok
+}
+
 /// Whether a Game Pass install ships NVIDIA's DLSS runtime anywhere under its
 /// `Content` folder. The exe itself may be unreadable, but the DLLs are not.
 fn game_pass_ships_dlss(content: &Path) -> bool {
@@ -1160,16 +1169,28 @@ pub fn inspect(exe: &Path) -> Result<GameStatus> {
     // folder refuses writes, and a dxgi.dll beside a packaged exe is never
     // loaded. Every one of them read as "no DLSS, Feeder path" here, because
     // what the scan finds is gamelaunchhelper.exe, a stub with nothing in it.
+    // A Game Pass / Store install is protected only sometimes. 0.13.16 refused
+    // every folder with a MicrosoftGame.config, which took out installs that
+    // had worked for their owners (Batman: Arkham Knight, Doom, Forza — #107;
+    // Watch Dogs via Game Pass in #62) and the Steam copy of Forza Horizon 6,
+    // which ships that file too (#106). What decides it is whether the folder
+    // takes a write and the exe can be read, so that is what is checked.
     if let Some(content) = game_pass_content_dir(d) {
-        let native = if game_pass_ships_dlss(&content) {
-            "The game itself ships DLSS (nvngx_dlss.dll is in its folder), so it supports DLSS natively; only this install cannot be modified."
-        } else {
-            "No nvngx_dlss.dll anywhere in its folder, so this game has no DLSS of its own either."
-        };
-        bail!(
-            "Game Pass / Microsoft Store copy ({}): Windows protects these installs — the              executable is locked, the folder refuses writes, and a dxgi.dll placed beside a              packaged exe is never loaded — so DLSS 5 cannot be installed on this copy. The same              game from Steam, Epic or GOG works. {native}",
-            content.display()
-        );
+        let locked = fs::File::open(exe).is_err() || !dir_writable(d);
+        if locked {
+            let native = if game_pass_ships_dlss(&content) {
+                "The game itself ships DLSS (nvngx_dlss.dll is in its folder), so it supports DLSS natively; only this install cannot be modified."
+            } else {
+                "No nvngx_dlss.dll anywhere in its folder, so this game has no DLSS of its own either."
+            };
+            bail!(
+                "Game Pass / Microsoft Store copy ({}): Windows protects this install — the \
+                 executable is locked or the folder refuses writes — so DLSS 5 cannot be \
+                 installed on this copy. Some Store games are installed unprotected and work; \
+                 this one is not. The same game from Steam, Epic or GOG works. {native}",
+                content.display()
+            );
+        }
     }
     let bitness = exe_bitness(exe)?;
     let shaders = d.join("reshade-shaders").join("Shaders");
@@ -1279,7 +1300,7 @@ pub fn inspect(exe: &Path) -> Result<GameStatus> {
 }
 
 /// Helper/launcher executables that are never the game.
-const NOT_GAME: [&str; 15] = [
+const NOT_GAME: [&str; 17] = [
     "unitycrashhandler",
     "unrealcefsubprocess",
     "crashreportclient",
@@ -1295,6 +1316,10 @@ const NOT_GAME: [&str; 15] = [
     "uninstall",
     "unins",
     "setup",
+    // Ubisoft's Support\GDF\FirewallInstall.exe outranked ACBSP.exe (#105).
+    "install",
+    // Rockstar's 64-bit PlayGTAIV.exe launcher outranked the 32-bit game (#94).
+    "playgtaiv",
 ];
 
 fn is_helper_name(stem_lower: &str) -> bool {
@@ -1353,6 +1378,8 @@ pub fn find_game_exes(dir: &Path) -> Vec<PathBuf> {
             n.as_str(),
             "engine"
                 | "content"
+                | "support"
+                | "gdf"
                 | "saved"
                 | "intermediate"
                 | "reshade-shaders"
@@ -1932,6 +1959,30 @@ mod tests {
         assert_eq!(exe, d.join("Fell & Sell.exe"));
     }
 
+    /// Two launchers that outranked the game: Ubisoft's
+    /// Support\GDF\FirewallInstall.exe beat ACBSP.exe (#105), and Rockstar's
+    /// 64-bit PlayGTAIV.exe beat the 32-bit GTAIV.exe (#94).
+    #[test]
+    fn firewall_installers_and_playgtaiv_are_not_the_game() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path().join("Assassin's Creed Brotherhood");
+        fs::create_dir_all(d.join("Support").join("GDF")).unwrap();
+        make_pe(&d.join("ACBSP.exe"), PE_X86);
+        make_pe(
+            &d.join("Support").join("GDF").join("FirewallInstall.exe"),
+            PE_X64,
+        );
+        let (exe, _) = resolve_target(&d).unwrap();
+        assert_eq!(exe, d.join("ACBSP.exe"));
+
+        let g = t.path().join("Grand Theft Auto IV").join("GTAIV");
+        fs::create_dir_all(&g).unwrap();
+        make_pe(&g.join("GTAIV.exe"), PE_X86);
+        make_pe(&g.join("PlayGTAIV.exe"), PE_X64);
+        let (exe, _) = resolve_target(&g).unwrap();
+        assert_eq!(exe, g.join("GTAIV.exe"));
+    }
+
     /// Satisfactory (Epic): the launcher names FactoryGameEGS.exe in the root,
     /// but the real game is the shipping exe under Engine\Binaries\Win64 (#29).
     /// A Direct3D 10 game imports d3d10_1.dll, and often d3d9.dll too for its
@@ -2453,25 +2504,21 @@ mod tests {
     /// A MicrosoftGame.config above the exe is the tell, and whether the
     /// game ships DLSS is read from its folder, not from the locked exe.
     #[test]
-    fn game_pass_copies_are_refused_with_the_native_dlss_verdict() {
+    fn game_pass_copies_are_refused_only_when_the_folder_is_locked() {
+        std::env::set_var("DLSS5ONECLICK_SKIP_GPU_CHECK", "1");
+        // A writable folder with MicrosoftGame.config (the Steam copy of Forza
+        // Horizon 6 ships one, and so do unprotected Store installs) inspects
+        // like any other game.
         let t = tempfile::tempdir().unwrap();
         let content = t.path().join("Content");
-        fs::create_dir_all(content.join("Game").join("Binaries")).unwrap();
+        fs::create_dir_all(&content).unwrap();
         fs::write(content.join("MicrosoftGame.config"), "<Game/>").unwrap();
-        let exe = testutil::make_pe(&content.join("gamelaunchhelper.exe"), PE_X64);
-        let err = inspect(&exe).unwrap_err().to_string();
-        assert!(err.contains("Game Pass"), "{err}");
-        assert!(err.contains("no DLSS of its own"), "{err}");
-
-        fs::write(content.join("Game").join("Binaries").join(DLSS_DLL), b"x").unwrap();
-        let err = inspect(&exe).unwrap_err().to_string();
-        assert!(err.contains("ships DLSS"), "{err}");
-
-        // A plain folder is untouched by this.
-        let t2 = tempfile::tempdir().unwrap();
-        let exe2 = testutil::make_pe(&t2.path().join("game.exe"), PE_X64);
-        std::env::set_var("DLSS5ONECLICK_SKIP_GPU_CHECK", "1");
-        assert!(inspect(&exe2).is_ok());
+        let exe = testutil::make_pe(&content.join("ForzaHorizon6.exe"), PE_X64);
+        assert!(inspect(&exe).is_ok());
+        assert!(!content.join(".dlss5oneclick-write-probe").exists());
+        assert!(!dir_writable(Path::new(
+            r"C:\Windows\System32\drivers\etc\nonexistent-dir"
+        )));
     }
 
     /// A folder of thousands of entries is skipped by every walk; the exe,

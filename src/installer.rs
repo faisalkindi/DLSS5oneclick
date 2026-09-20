@@ -548,7 +548,9 @@ fn step_opti(
     // recorded in the manifest; a copy this tool placed is refreshed when
     // upstream moves on, and one it did not place is never touched.
     let repo = opti_repo();
-    let latest = net::latest_tag(client, repo).ok();
+    // A pinned tag stands in for "latest": a build that regressed for a game
+    // can be held at the one that worked (#104).
+    let latest = opti_pinned_tag().or_else(|| net::latest_tag(client, repo).ok());
     if st.opti {
         // No manifest at all: somebody else put OptiScaler there. A manifest
         // without a "# tag" line is ours, from before the tag was recorded --
@@ -852,6 +854,17 @@ pub const OPTI_SOURCE_ENV: &str = "DLSS5ONECLICK_OPTI_SOURCE";
 /// becomes ShyVortex's whatever else was chosen, and the ini gets
 /// `[DLSSG] AmpereMfgUnlock=true`.
 pub const AMPERE_MFG_ENV: &str = "DLSS5ONECLICK_AMPERE_MFG";
+
+/// A release tag of the chosen OptiScaler build to install instead of the
+/// newest one (`--opti-tag=v0.8.4`). Unset means newest.
+pub const OPTI_TAG_ENV: &str = "DLSS5ONECLICK_OPTI_TAG";
+
+pub fn opti_pinned_tag() -> Option<String> {
+    std::env::var(OPTI_TAG_ENV)
+        .ok()
+        .map(|t| t.trim().to_owned())
+        .filter(|t| !t.is_empty())
+}
 
 pub fn ampere_mfg() -> bool {
     std::env::var_os(AMPERE_MFG_ENV).is_some()
