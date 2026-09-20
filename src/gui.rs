@@ -1099,6 +1099,40 @@ fn base_tiles(st: Option<&GameStatus>, engine: Engine, upstream_on: bool) -> Vec
     }
 }
 
+/// The height an engine card needs at `col_w` for its text to stay inside
+/// the border. A fixed 74 px fitted the two lines at 1500 px and let them
+/// wrap past the bottom edge in narrower windows (#94).
+fn engine_card_height(ui: &egui::Ui, col_w: f32, title: &str, lines: &[&str], note: &str) -> f32 {
+    let painter = ui.painter();
+    // Widest pill state, so the text column never grows when the state changes.
+    let pill_w = painter
+        .layout_no_wrap(
+            "UNAVAILABLE".to_owned(),
+            t::plex_semibold(10.0),
+            t::TEXT_DIM,
+        )
+        .size()
+        .x;
+    let inner_w = (col_w - 38.0 - 12.0 - 32.0 - pill_w).max(40.0);
+    let mut h = 10.0 + 8.0;
+    h += painter
+        .layout(title.to_owned(), t::plex_semibold(13.5), t::TEXT, inner_w)
+        .size()
+        .y;
+    for l in lines
+        .iter()
+        .copied()
+        .chain((!note.is_empty()).then_some(note))
+    {
+        h += 2.0
+            + painter
+                .layout(l.to_owned(), t::plex(11.0), t::TEXT, inner_w)
+                .size()
+                .y;
+    }
+    h.ceil().max(74.0)
+}
+
 /// One selectable engine card: painted like a component tile, but clickable,
 /// with a radio dot, an accent border when chosen and a dimmed body when the
 /// game cannot use it.
@@ -3031,8 +3065,34 @@ impl eframe::App for App {
                     // text past its bottom edge (#77).
                     let three_up = row_w >= 1500.0;
                     let cols = if three_up { 3.0 } else { 2.0 };
-                    let card_h = 74.0;
                     let col_w = ((row_w - gap * (cols - 1.0)) / cols).floor();
+                    let reshade_title = "ReShade + DLSS 5 add-on";
+                    let reshade_lines = ["The default. Works in every supported game.", "In game: Home → Add-ons → DLSS 5 Neural Rendering."];
+                    let opti_title = "OptiScaler (built-in NR pass)";
+                    let opti_lines = ["Dagherbou's fork, no ReShade. Also swaps upscalers.", "In game: Insert → enable Neural Rendering."];
+                    let opti_note = if native {
+                        ""
+                    } else {
+                        "Needs a game with its own DLSS — this one has none."
+                    };
+                    let aio_title = "ReShade + standalone AIO \u{00b7} experimental";
+                    let aio_lines = [
+                        "kibblerz's all-in-one: neural rendering, super resolution, frame generation.",
+                        "In game: Home \u{2192} Add-ons \u{2192} Standalone DLSS-NR + SR. Windowed mode recommended.",
+                    ];
+                    let aio_note = if aio_ok {
+                        ""
+                    } else if ok_status.as_ref().is_some_and(|s| s.is32()) {
+                        "64-bit games only."
+                    } else {
+                        "Needs a game ReShade can reach from dxgi.dll."
+                    };
+                    let aio_h = engine_card_height(ui, col_w, aio_title, &aio_lines, aio_note);
+                    let mut card_h = engine_card_height(ui, col_w, reshade_title, &reshade_lines, "")
+                        .max(engine_card_height(ui, col_w, opti_title, &opti_lines, opti_note));
+                    if three_up {
+                        card_h = card_h.max(aio_h);
+                    }
                     let (row_rect, _) =
                         ui.allocate_exact_size(Vec2::new(row_w, card_h), egui::Sense::hover());
                     let left = egui::Rect::from_min_size(row_rect.min, Vec2::new(col_w, card_h));
@@ -3045,8 +3105,8 @@ impl eframe::App for App {
                         left,
                         self.engine == Engine::ReShade,
                         true,
-                        "ReShade + DLSS 5 add-on",
-                        &["The default. Works in every supported game.", "In game: Home → Add-ons → DLSS 5 Neural Rendering."],
+                        reshade_title,
+                        &reshade_lines,
                         "",
                     ) {
                         self.engine = Engine::ReShade;
@@ -3056,13 +3116,9 @@ impl eframe::App for App {
                         right,
                         self.engine == Engine::Opti,
                         native,
-                        "OptiScaler (built-in NR pass)",
-                        &["Dagherbou's fork, no ReShade. Also swaps upscalers.", "In game: Insert → enable Neural Rendering."],
-                        if native {
-                            ""
-                        } else {
-                            "Needs a game with its own DLSS — this one has none."
-                        },
+                        opti_title,
+                        &opti_lines,
+                        opti_note,
                     ) {
                         self.engine = Engine::Opti;
                     }
@@ -3076,26 +3132,17 @@ impl eframe::App for App {
                         // card was mostly empty (#77).
                         ui.add_space(gap);
                         let (r, _) = ui
-                            .allocate_exact_size(Vec2::new(row_w, card_h), egui::Sense::hover());
-                        egui::Rect::from_min_size(r.min, Vec2::new(col_w, card_h))
+                            .allocate_exact_size(Vec2::new(row_w, aio_h), egui::Sense::hover());
+                        egui::Rect::from_min_size(r.min, Vec2::new(col_w, aio_h))
                     };
                     if engine_card(
                         ui,
                         row2,
                         self.engine == Engine::Aio,
                         aio_ok,
-                        "ReShade + standalone AIO \u{00b7} experimental",
-                        &[
-                            "kibblerz's all-in-one: neural rendering, super resolution, frame generation.",
-                            "In game: Home \u{2192} Add-ons \u{2192} Standalone DLSS-NR + SR. Windowed mode recommended.",
-                        ],
-                        if aio_ok {
-                            ""
-                        } else if ok_status.as_ref().is_some_and(|s| s.is32()) {
-                            "64-bit games only."
-                        } else {
-                            "Needs a game ReShade can reach from dxgi.dll."
-                        },
+                        aio_title,
+                        &aio_lines,
+                        aio_note,
                     ) {
                         self.engine = Engine::Aio;
                     }
@@ -3290,9 +3337,25 @@ impl eframe::App for App {
                         );
                     });
                     let gap = 8.0;
-                    let card_h = 74.0;
                     let row_w = ui.available_width();
                     let col_w = ((row_w - gap) / 2.0).floor();
+                    let stable_title = "Stable \u{2014} RenoDX DLSS 5 add-on";
+                    let stable_lines = [
+                        "The proven route. The network runs after the upscaler, at output resolution.",
+                        "In game: Home \u{2192} Add-ons \u{2192} DLSS 5 Neural Rendering.",
+                    ];
+                    let up_title = "Experimental \u{2014} Neural Upstream";
+                    let up_lines = [
+                        "Runs the network before the upscaler, at render resolution, so it costs less.",
+                        "Replaces the add-on on the left. Read the warning below first.",
+                    ];
+                    let up_note = if native {
+                        ""
+                    } else {
+                        "Needs a game with its own DLSS \u{2014} this one has none."
+                    };
+                    let card_h = engine_card_height(ui, col_w, stable_title, &stable_lines, "")
+                        .max(engine_card_height(ui, col_w, up_title, &up_lines, up_note));
                     let (row_rect, _) =
                         ui.allocate_exact_size(Vec2::new(row_w, card_h), egui::Sense::hover());
                     let left = egui::Rect::from_min_size(row_rect.min, Vec2::new(col_w, card_h));
@@ -3305,11 +3368,8 @@ impl eframe::App for App {
                         left,
                         !self.upstream_on,
                         true,
-                        "Stable \u{2014} RenoDX DLSS 5 add-on",
-                        &[
-                            "The proven route. The network runs after the upscaler, at output resolution.",
-                            "In game: Home \u{2192} Add-ons \u{2192} DLSS 5 Neural Rendering.",
-                        ],
+                        stable_title,
+                        &stable_lines,
                         "",
                     ) {
                         self.upstream_on = false;
@@ -3319,16 +3379,9 @@ impl eframe::App for App {
                         right,
                         self.upstream_on,
                         native,
-                        "Experimental \u{2014} Neural Upstream",
-                        &[
-                            "Runs the network before the upscaler, at render resolution, so it costs less.",
-                            "Replaces the add-on on the left. Read the warning below first.",
-                        ],
-                        if native {
-                            ""
-                        } else {
-                            "Needs a game with its own DLSS \u{2014} this one has none."
-                        },
+                        up_title,
+                        &up_lines,
+                        up_note,
                     ) {
                         self.upstream_on = true;
                     }
@@ -3835,5 +3888,40 @@ mod tests {
         assert!(tiles
             .iter()
             .any(|t| t.title == "DLSS 5 add-on \u{00b7} leaked" && !(t.ok)(&st)));
+    }
+
+    /// At the default 1100 px window (478 px cards) the AIO card's lines wrap, and the card
+    /// grows to hold them instead of letting them run past its border (#94).
+    #[test]
+    fn engine_cards_grow_with_wrapped_text() {
+        let ctx = egui::Context::default();
+        t::install(&ctx);
+        let mut heights = (0.0f32, 0.0f32, 0.0f32);
+        ctx.begin_pass(egui::RawInput::default());
+        {
+            let mut root = egui::Ui::new(ctx.clone(), egui::Id::new("t"), egui::UiBuilder::new());
+            egui::CentralPanel::default().show(&mut root, |ui| {
+                let lines = [
+                    "kibblerz's all-in-one: neural rendering, super resolution, frame generation.",
+                    "In game: Home \u{2192} Add-ons \u{2192} Standalone DLSS-NR + SR. Windowed mode recommended.",
+                ];
+                let short = ["The default. Works in every supported game.", "In game: Home → Add-ons → DLSS 5 Neural Rendering."];
+                heights.0 = engine_card_height(ui, 478.0, "ReShade + standalone AIO · experimental", &lines, "");
+                heights.1 = engine_card_height(ui, 478.0, "ReShade + DLSS 5 add-on", &short, "");
+                heights.2 = engine_card_height(ui, 1000.0, "ReShade + standalone AIO · experimental", &lines, "");
+            });
+        }
+        ctx.end_pass().textures_delta.clear();
+        // Two wrapped lines: two more 11 px rows than the unwrapped card.
+        assert!(
+            heights.0 >= heights.2 + 2.0 * 11.0,
+            "{} vs {}",
+            heights.0,
+            heights.2
+        );
+        // Short lines at the same width still fit the base height.
+        assert_eq!(heights.1, 74.0);
+        // Nothing wraps at 1000 px.
+        assert_eq!(heights.2, 74.0);
     }
 }
