@@ -167,7 +167,7 @@ pub enum Api {
     /// Direct3D 9. DLSS 5 needs a D3D11/12 device; the supported path is
     /// dgVoodoo2 translating D3D9 to D3D11 so this tool's `dxgi.dll` ReShade
     /// can load (verified on Dead or Alive 5 Last Round, #17, #37). Install
-    /// downloads official dgVoodoo 2.87.3 into the game folder when missing.
+    /// downloads official dgVoodoo 2.87.5 into the game folder when missing.
     /// Aion loads system d3d9.dll by name (#16) so local ReShade d3d9.dll hooks it.
     Dx9,
     /// Direct3D 10/10.1. The 32-bit Feeder add-on runs these natively from
@@ -1222,14 +1222,14 @@ pub fn inspect(exe: &Path) -> Result<GameStatus> {
     // Feeder (verified working on Dead or Alive 5 Last Round, #17).
     if d.join("d3d9.dll").is_file() && !d.join(RESHADE_PROXY).is_file() && !is_dgvoodoo(d) {
         problems.push(
-            "A d3d9.dll proxy is present that is not dgVoodoo2. DirectX 9 itself is not a dead              end -- DLSS 5 needs a D3D11/12 device, and dgVoodoo2 provides one, which is how a              D3D9 game can work here (#17, #37) -- but this tool cannot install behind another              wrapper. Replace it with dgVoodoo 2.87.3 (MS\\x86 or MS\\x64\\D3D9.dll plus              dgVoodoo.conf, OutputAPI = d3d11_fl11_0, VRAM >= 4096) and run Install again."
+            "A d3d9.dll proxy is present that is not dgVoodoo2. DirectX 9 itself is not a dead              end -- DLSS 5 needs a D3D11/12 device, and dgVoodoo2 provides one, which is how a              D3D9 game can work here (#17, #37) -- but this tool cannot install behind another              wrapper. Replace it with dgVoodoo 2.87.5 (MS\\x86 or MS\\x64\\D3D9.dll plus              dgVoodoo.conf, OutputAPI = d3d11_fl11_0, VRAM >= 4096) and run Install again."
                 .into(),
         );
     }
     let api_detected = detect_api(exe);
     let api = api_override().unwrap_or(api_detected);
     // Plain D3D9 (Gothic 3, Aion, etc.): ReShade is dxgi.dll here, which a
-    // D3D9 process never loads. Install adds official dgVoodoo 2.87.3 so DX9
+    // D3D9 process never loads. Install adds official dgVoodoo 2.87.5 so DX9
     // is not a hard refuse. A foreign non-dgVoodoo d3d9.dll still blocks above.
     let is32 = bitness == 32;
     if is32 && api == Api::Dx12 {
@@ -2382,7 +2382,7 @@ mod tests {
     fn dll_mentions_dgvoodoo_ascii_and_utf16() {
         assert!(dll_mentions_dgvoodoo(b"MZ...dgVoodoo2 wrapper..."));
         assert!(!dll_mentions_dgvoodoo(b"MZ some other wrapper"));
-        // Official 2.87.3 MS/x86/D3D9.dll embeds the name as UTF-16LE only.
+        // Official MS/x86/D3D9.dll (2.87.3 and 2.87.5) embeds the name as UTF-16LE only.
         let mut utf16 = b"MZ\0\0".to_vec();
         for &c in b"dgVoodoo" {
             utf16.push(c);

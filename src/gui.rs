@@ -2894,9 +2894,9 @@ impl eframe::App for App {
                 {
                     ui.label(
                         RichText::new(
-                            "DirectX 9: Install will download dgVoodoo 2.87.3 into the game folder \
+                            "DirectX 9: Install will download dgVoodoo 2.87.5 into the game folder \
                              first (official GitHub release → d3d9.dll + dgVoodoo.conf), then continue \
-                             with ReShade / Feeder. / DirectX 9: Install сначала скачает dgVoodoo 2.87.3 \
+                             with ReShade / Feeder. / DirectX 9: Install сначала скачает dgVoodoo 2.87.5 \
                              в папку игры, затем продолжит установку.",
                         )
                         .font(t::plex(12.0))

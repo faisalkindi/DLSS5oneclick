@@ -1,7 +1,7 @@
 //! The install steps, in the order the DLSS5-Feeder README lists them.
 //!
 //! Sources (verified 2026-08-31):
-//! 0. dgVoodoo 2.87.3 — only when the game is Direct3D 9 and dgVoodoo is not
+//! 0. dgVoodoo 2.87.5 — only when the game is Direct3D 9 and dgVoodoo is not
 //!    already in the game folder. Downloaded from the official GitHub release
 //!    (not bundled); extracts `MS/{x86|x64}/D3D9.dll` by exe bitness → `d3d9.dll`
 //!    + smart-merged conf (force OutputAPI, floor VRAM, preserve the rest).
@@ -39,12 +39,12 @@ pub const FEEDER_REPO: &str = "jlrouzies-fr/DLSS5-Feeder";
 pub const LUMENITE_ZIP: &str =
     "https://codeload.github.com/umar-afzaal/LumeniteFX/zip/refs/heads/mainline";
 
-/// Official dgVoodoo 2.87.3 release zip (not bundled — downloaded into the game
+/// Official dgVoodoo 2.87.5 release zip (not bundled — downloaded into the game
 /// folder at Install time). License allows shipping individual DLLs with a
 /// game; forbids bundling inside launchers for general multi-app use.
-pub const DGVOODOO_TAG: &str = "v2.87.3";
+pub const DGVOODOO_TAG: &str = "v2.87.5";
 pub const DGVOODOO_ZIP: &str =
-    "https://github.com/dege-diosg/dgVoodoo2/releases/download/v2.87.3/dgVoodoo2_87_3.zip";
+    "https://github.com/dege-diosg/dgVoodoo2/releases/download/v2.87.5/dgVoodoo2_87_5.zip";
 /// Zip members for D3D9 (32-bit Gothic-class vs rare 64-bit DX9).
 const DGVOODOO_D3D9_MEMBER_X86: &str = "MS/x86/D3D9.dll";
 const DGVOODOO_D3D9_MEMBER_X64: &str = "MS/x64/D3D9.dll";
@@ -56,8 +56,8 @@ const DGVOODOO_OUTPUT_API: &str = "d3d11_fl11_0";
 
 /// Full template used only when no `dgVoodoo.conf` exists yet.
 const DGVOODOO_CONF_TEMPLATE: &str = "\
-; Written by DLSS5oneclick — official dgVoodoo 2.87.3 (DX9 → D3D11 for ReShade dxgi.dll)
-; https://github.com/dege-diosg/dgVoodoo2/releases/tag/v2.87.3
+; Written by DLSS5oneclick — official dgVoodoo 2.87.5 (DX9 → D3D11 for ReShade dxgi.dll)
+; https://github.com/dege-diosg/dgVoodoo2/releases/tag/v2.87.5
 [General]
 OutputAPI = d3d11_fl11_0
 Adapters = all
@@ -969,7 +969,7 @@ const STEP_RESHADE: Step = Step {
     run: step_reshade,
 };
 const STEP_DGVOODOO: Step = Step {
-    name: "dgVoodoo 2.87.3 (DX9 → D3D11)",
+    name: "dgVoodoo 2.87.5 (DX9 → D3D11)",
     run: step_dgvoodoo,
 };
 const STEP_HEADERS: Step = Step {
@@ -1811,15 +1811,15 @@ fn step_dgvoodoo(
         if d.join("d3d9.dll").is_file() {
             bail!(
                 "a d3d9.dll that is not dgVoodoo is already present; remove or replace it with \
-                 dgVoodoo 2.87.3 ({member}), then Install again"
+                 dgVoodoo 2.87.5 ({member}), then Install again"
             );
         }
         progress(0, &format!("Downloading dgVoodoo {DGVOODOO_TAG}"));
-        let z = work.join("dgVoodoo2_87_3.zip");
-        net::download(client, DGVOODOO_ZIP, &z, "dgVoodoo 2.87.3", progress)?;
+        let z = work.join("dgVoodoo2_87_5.zip");
+        net::download(client, DGVOODOO_ZIP, &z, "dgVoodoo 2.87.5", progress)?;
         progress(90, &format!("Extracting {member}"));
         out.extend(install_dgvoodoo_from_zip(&z, d, st.bitness)?);
-        progress(100, "dgVoodoo 2.87.3 ready");
+        progress(100, "dgVoodoo 2.87.5 ready");
         return Ok(out);
     }
     // DLL already there: merge conf so VRAM/OutputAPI stay safe without wiping CPL.
@@ -3895,7 +3895,7 @@ mod tests {
         let d = t.path();
         // Old ReShade rename must not be restored as dgVoodoo.
         fs::write(d.join("d3d9.dll.off"), b"MZ old reshade not dgVoodoo").unwrap();
-        let z = d.join("dgVoodoo2_87_3.zip");
+        let z = d.join("dgVoodoo2_87_5.zip");
         write_zip(
             &z,
             &[(
@@ -3959,7 +3959,7 @@ mod tests {
     fn dgvoodoo_from_zip_picks_x64_member() {
         let t = tempfile::tempdir().unwrap();
         let d = t.path();
-        let z = d.join("dgVoodoo2_87_3.zip");
+        let z = d.join("dgVoodoo2_87_5.zip");
         write_zip(
             &z,
             &[(
@@ -3988,7 +3988,7 @@ mod tests {
             .iter()
             .map(|s| s.name)
             .collect();
-        assert_eq!(names[0], "dgVoodoo 2.87.3 (DX9 → D3D11)");
+        assert_eq!(names[0], "dgVoodoo 2.87.5 (DX9 → D3D11)");
         assert!(names.iter().any(|n| n.starts_with("ReShade")));
     }
 
@@ -4015,7 +4015,7 @@ mod tests {
             .iter()
             .map(|s| s.name)
             .collect();
-        assert_eq!(names[0], "dgVoodoo 2.87.3 (DX9 → D3D11)");
+        assert_eq!(names[0], "dgVoodoo 2.87.5 (DX9 → D3D11)");
     }
 
     #[test]
