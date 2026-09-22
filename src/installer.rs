@@ -614,6 +614,21 @@ fn step_opti(
     let zip_path = work.join("optiscaler-dlssnr.zip");
     net::download(client, asset, &zip_path, "OptiScaler DLSS-NR", progress)?;
 
+    // What the previous install of this tool put there, so files the new
+    // package no longer ships can be taken away again. A leftover
+    // nvngx.dll_dlssnr.dll is the one that matters: Dagherbou's build reaches
+    // the neural model through that forwarder, wilsjo2's and ShyVortex's
+    // reach it through the driver and never load it, and the Feeder's 1.17
+    // notes list it among the things that silently stop the pass.
+    let previous: Vec<String> = fs::read_to_string(d.join(game::OPTI_MANIFEST))
+        .map(|m| {
+            m.lines()
+                .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+
     let f = fs::File::open(&zip_path)?;
     let mut zip = zip::ZipArchive::new(f).context("OptiScaler download is not a valid zip")?;
     let names: Vec<String> = zip.file_names().map(str::to_owned).collect();
@@ -637,6 +652,18 @@ fn step_opti(
         if fname.eq_ignore_ascii_case("setup_windows.bat")
             || fname.eq_ignore_ascii_case("setup_linux.sh")
             || fname.starts_with("!!")
+        {
+            continue;
+        }
+        // ShyVortex's package carries a docs/ tree of forty markdown files,
+        // wilsjo2's a dlssnr/design one and a tests/ folder. Documentation
+        // belongs in a repository, not beside someone's game exe. Licence
+        // texts are kept: they travel with the binaries.
+        if parts[0].eq_ignore_ascii_case("docs")
+            || parts[0].eq_ignore_ascii_case("tests")
+            || (fname.to_ascii_lowercase().ends_with(".md")
+                && !parts.iter().any(|p| p.eq_ignore_ascii_case("Licenses")))
+            || (parts.len() == 1 && fname.eq_ignore_ascii_case("LICENSE"))
         {
             continue;
         }
@@ -675,6 +702,28 @@ fn step_opti(
         format!("{header}{}", installed.join("\n")),
     )?;
     installed.push(game::OPTI_MANIFEST.into());
+    // Switching build (Dagherbou to wilsjo2, or on to ShyVortex's) leaves the
+    // files the old package had and the new one does not. The settings file is
+    // the user's and is kept whatever happens.
+    for rel in previous {
+        if installed.iter().any(|i| i.eq_ignore_ascii_case(&rel))
+            || rel.eq_ignore_ascii_case(OPTI_INI)
+            || rel.eq_ignore_ascii_case(game::OPTI_MANIFEST)
+        {
+            continue;
+        }
+        let clean: Vec<&str> = rel
+            .split(['/', '\\'])
+            .filter(|p| !p.is_empty() && *p != "." && *p != "..")
+            .collect();
+        if clean.is_empty() {
+            continue;
+        }
+        let stale = d.join(clean.join(std::path::MAIN_SEPARATOR_STR));
+        if stale.is_file() && fs::remove_file(&stale).is_ok() {
+            progress(0, &format!("removed {rel}, which this build does not use"));
+        }
+    }
     Ok(installed)
 }
 
@@ -739,6 +788,26 @@ fn patch_opti_ini(st: &GameStatus, d: &Path) -> Result<()> {
                 ("OptiFG", "HUDFix", "true"),
             ] {
                 if let Some(patched) = set_ini_key(&cur, section, key, value) {
+                    cur = patched;
+                }
+            }
+        }
+        // An OptiScaler.ini copied from another game brings that game's
+        // [ProcessFilter] TargetProcessName along, and OptiScaler then loads
+        // and does nothing at all in this one (DLSS5-Feeder 1.17 notes). Only
+        // a name that is neither empty, "auto", nor this game's exe is reset.
+        let exe_name = st
+            .exe
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if let Some(target) = ini_value(&cur, "ProcessFilter", "TargetProcessName") {
+            let t = target.trim().to_ascii_lowercase();
+            if !t.is_empty() && t != "auto" && t != exe_name {
+                if let Some(patched) =
+                    set_ini_key(&cur, "ProcessFilter", "TargetProcessName", "auto")
+                {
                     cur = patched;
                 }
             }
@@ -1100,6 +1169,21 @@ pub fn set_dlss_nr_enabled(ini: &str) -> Option<String> {
 /// Set `key=value` inside `[section]`, appending the section or the key when
 /// missing; `None` when it already reads that way. Section-scoped because
 /// OptiScaler.ini repeats names like `Enabled` under many headings.
+/// The value of `key` in `section`, as written in `ini`.
+fn ini_value(ini: &str, section: &str, key: &str) -> Option<String> {
+    let header = format!("[{section}]");
+    let mut in_section = false;
+    for line in ini.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_section = t.eq_ignore_ascii_case(&header);
+        } else if in_section && t.split('=').next().unwrap_or("").trim() == key {
+            return t.split_once('=').map(|(_, v)| v.trim().to_owned());
+        }
+    }
+    None
+}
+
 pub fn set_ini_key(ini: &str, section: &str, key: &str, value: &str) -> Option<String> {
     let header = format!("[{section}]");
     let lines: Vec<&str> = ini.split_inclusive('\n').collect();
@@ -4760,5 +4844,21 @@ AmpereMfgUnlock=true
             ),
             "{out}"
         );
+    }
+
+    /// A settings file copied from another game names that game's exe, which
+    /// puts OptiScaler into pass-through: it loads and does nothing.
+    #[test]
+    fn a_foreign_process_filter_is_reset_and_our_own_is_kept() {
+        let ini = "[ProcessFilter]\nTargetProcessName=OtherGame.exe\n";
+        assert_eq!(
+            ini_value(ini, "ProcessFilter", "TargetProcessName").as_deref(),
+            Some("OtherGame.exe")
+        );
+        assert_eq!(ini_value(ini, "DlssNr", "TargetProcessName"), None);
+        let out = set_ini_key(ini, "ProcessFilter", "TargetProcessName", "auto").unwrap();
+        assert!(out.contains("TargetProcessName=auto"));
+        // Already auto: nothing to write.
+        assert!(set_ini_key(&out, "ProcessFilter", "TargetProcessName", "auto").is_none());
     }
 }
