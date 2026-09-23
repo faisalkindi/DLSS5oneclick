@@ -2976,7 +2976,7 @@ impl eframe::App for App {
                     let cb = egui::Checkbox::new(
                         &mut newest,
                         RichText::new(
-                            "Try the newest add-on build (5.2.1 or later) instead of the default 4.70 \u{2014} multi-pass sliders, new colour codec; crashes or blown-out colours reported in some games",
+                            "Try the newest add-on build (5.2.1 or later) instead of the default 4.70 \u{2014} multi-pass sliders, new colour codec, but no Enable Upscaling option (4.x only); crashes or blown-out colours reported in some games",
                         )
                         .font(t::plex(11.5))
                         .color(t::TEXT_SOFT),
