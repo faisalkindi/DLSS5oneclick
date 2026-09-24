@@ -350,59 +350,8 @@ impl App {
         if self.resolved_exe != self.renodx_for {
             self.renodx_for = self.resolved_exe.clone();
             self.renodx_on = false;
-            // The MFG tick belongs to the game, not to the session: a game that
-            // already has the add-on comes back ticked, so re-running Install
-            // does not silently drop it (#83). Remove takes the file away, and
-            // the tick follows it.
-            self.ada_mfg = matches!(&self.status, Some(Ok(s)) if s.mfg);
-            self.ampere_mfg = self
-                .status
-                .as_ref()
-                .and_then(|r| r.as_ref().ok())
-                .and_then(|s| std::fs::read_to_string(s.game_dir().join(game::OPTI_MANIFEST)).ok())
-                .is_some_and(|m| {
-                    m.lines()
-                        .any(|l| l.trim() == format!("# repo {}", installer::OPTI_UNLOCKED_REPO))
-                });
+            self.load_game_options();
             self.sync_setup(true);
-            // OptiScaler's per-game choices come from that game's folder, not
-            // from whatever game was open before: the pre-SR build from the
-            // manifest's repo line, frame generation and the model resolution
-            // from its OptiScaler.ini.
-            let st = self.status.as_ref().and_then(|r| r.as_ref().ok()).cloned();
-            let manifest = st
-                .as_ref()
-                .and_then(|s| std::fs::read_to_string(s.game_dir().join(game::OPTI_MANIFEST)).ok())
-                .unwrap_or_default();
-            self.opti_presr = manifest
-                .lines()
-                .any(|l| l.trim() == format!("# repo {}", installer::OPTI_PRESR_REPO));
-            let ini = st
-                .as_ref()
-                .and_then(|s| std::fs::read_to_string(s.game_dir().join(installer::OPTI_INI)).ok())
-                .unwrap_or_default();
-            self.opti_fg = installer::ini_value(&ini, "FrameGen", "Enabled")
-                .is_some_and(|v| v.eq_ignore_ascii_case("true"))
-                && installer::ini_value(&ini, "FrameGen", "FGOutput")
-                    .is_some_and(|v| v.eq_ignore_ascii_case("fsrfg"));
-            // Model resolution: what the game already runs at, else 75% on
-            // RTX 20/30 (the full-size pass costs them the most frame time and
-            // input latency, #112), except on the pre-SR and RTX 20/30 builds,
-            // which flicker below 100%.
-            let recorded = installer::ini_value(&ini, "DlssNr", "WorkingScale")
-                .and_then(|v| v.parse::<f32>().ok())
-                .filter(|v| (0.25..=2.0).contains(v));
-            let tier = st.as_ref().and_then(|s| s.gpu.as_ref().map(|(_, t)| *t));
-            self.working_scale = match recorded {
-                Some(v) => v,
-                None if tier == Some(crate::gpu::Tier::Rtx2030)
-                    && !self.opti_presr
-                    && !self.ampere_mfg =>
-                {
-                    0.75
-                }
-                None => 1.0,
-            };
             self.start_renodx_lookup();
         } else if !self.advanced {
             self.sync_setup(false);
@@ -416,6 +365,65 @@ impl App {
     /// (after an install, or when Advanced closes) only the picker's setup is
     /// re-read, so the tiles and the Advanced controls never lag behind what
     /// Install will do.
+    /// The per-game options that live in the game's own folder: the MFG
+    /// add-on, OptiScaler's build, frame generation and model resolution. Read
+    /// on a game change and when Advanced closes, so nothing ticked for one
+    /// game, or left in Advanced, carries into an automatic install.
+    fn load_game_options(&mut self) {
+        // The MFG tick belongs to the game, not to the session: a game that
+        // already has the add-on comes back ticked, so re-running Install
+        // does not silently drop it (#83). Remove takes the file away, and
+        // the tick follows it.
+        self.ada_mfg = matches!(&self.status, Some(Ok(s)) if s.mfg);
+        self.ampere_mfg = self
+            .status
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .and_then(|s| std::fs::read_to_string(s.game_dir().join(game::OPTI_MANIFEST)).ok())
+            .is_some_and(|m| {
+                m.lines()
+                    .any(|l| l.trim() == format!("# repo {}", installer::OPTI_UNLOCKED_REPO))
+            });
+        // OptiScaler's per-game choices come from that game's folder, not
+        // from whatever game was open before: the pre-SR build from the
+        // manifest's repo line, frame generation and the model resolution
+        // from its OptiScaler.ini.
+        let st = self.status.as_ref().and_then(|r| r.as_ref().ok()).cloned();
+        let manifest = st
+            .as_ref()
+            .and_then(|s| std::fs::read_to_string(s.game_dir().join(game::OPTI_MANIFEST)).ok())
+            .unwrap_or_default();
+        self.opti_presr = manifest
+            .lines()
+            .any(|l| l.trim() == format!("# repo {}", installer::OPTI_PRESR_REPO));
+        let ini = st
+            .as_ref()
+            .and_then(|s| std::fs::read_to_string(s.game_dir().join(installer::OPTI_INI)).ok())
+            .unwrap_or_default();
+        self.opti_fg = installer::ini_value(&ini, "FrameGen", "Enabled")
+            .is_some_and(|v| v.eq_ignore_ascii_case("true"))
+            && installer::ini_value(&ini, "FrameGen", "FGOutput")
+                .is_some_and(|v| v.eq_ignore_ascii_case("fsrfg"));
+        // Model resolution: what the game already runs at, else 75% on
+        // RTX 20/30 (the full-size pass costs them the most frame time and
+        // input latency, #112), except on the pre-SR and RTX 20/30 builds,
+        // which flicker below 100%.
+        let recorded = installer::ini_value(&ini, "DlssNr", "WorkingScale")
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| (0.25..=2.0).contains(v));
+        let tier = st.as_ref().and_then(|s| s.gpu.as_ref().map(|(_, t)| *t));
+        self.working_scale = match recorded {
+            Some(v) => v,
+            None if tier == Some(crate::gpu::Tier::Rtx2030)
+                && !self.opti_presr
+                && !self.ampere_mfg =>
+            {
+                0.75
+            }
+            None => 1.0,
+        };
+    }
+
     fn sync_setup(&mut self, first: bool) {
         let Some(st) = self.status.as_ref().and_then(|r| r.as_ref().ok()).cloned() else {
             return;
@@ -425,9 +433,7 @@ impl App {
             .ok()
             .map(|t| t.trim().to_owned());
         if setup::hand_chosen(&st) {
-            if first {
-                self.advanced = true;
-            }
+            self.advanced = true;
             self.upstream_on = st.upstream;
             self.consumer = installer::Consumer::Dlss5;
             self.engine = if st.opti {
@@ -455,6 +461,8 @@ impl App {
             self.engine = Engine::ReShade;
             self.upstream_on = false;
             self.consumer = installer::Consumer::Dlss5;
+            self.renodx_classic = false;
+            self.renodx_steady = false;
         }
     }
 
@@ -605,13 +613,13 @@ impl App {
         };
         match (&forced, &st) {
             (Some((s, sw)), _) => {
-                engine = setup::apply(s);
+                engine = setup::apply(s, true);
                 upstream = false;
                 switch_engine = *sw;
             }
             (None, Some(g)) if remove.is_none() && !self.advanced => match setup::current(g) {
                 Some(s) => {
-                    engine = setup::apply(&s);
+                    engine = setup::apply(&s, true);
                     upstream = false;
                 }
                 // Nothing on the ladder fits: install nothing the previous
@@ -619,11 +627,15 @@ impl App {
                 None => setup::clear(),
             },
             _ => {
-                setup::apply(&setup::Setup {
-                    engine,
-                    consumer: self.consumer,
-                    addon_tag: manual_tag,
-                });
+                // Chosen by hand under Advanced: a build tick is the user's pin.
+                setup::apply(
+                    &setup::Setup {
+                        engine,
+                        consumer: self.consumer,
+                        addon_tag: manual_tag,
+                    },
+                    false,
+                );
             }
         }
         // A switch takes the RenoDX HDR mod out with everything else; put it
@@ -3246,7 +3258,9 @@ impl eframe::App for App {
                         if ui.add_enabled(!self.running && !hand, adv).clicked() {
                             self.advanced = !self.advanced;
                             if !self.advanced {
-                                // Closing Advanced returns to the picker's setup.
+                                // Closing Advanced returns to the picker's
+                                // setup and the game's own options.
+                                self.load_game_options();
                                 self.sync_setup(false);
                             }
                         }

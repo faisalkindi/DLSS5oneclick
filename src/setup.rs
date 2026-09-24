@@ -89,7 +89,15 @@ fn profile(st: &GameStatus) -> Option<(&'static [Setup], &'static str)> {
 /// tool offers fits (a Vulkan game without DLSS of its own).
 pub fn ladder(st: &GameStatus) -> Vec<Setup> {
     if let Some((l, _)) = profile(st) {
-        return l.to_vec();
+        let mut l = l.to_vec();
+        // A game already on ReShade (ours or the user's) cannot start on
+        // OptiScaler, and the list only moves down: OptiScaler goes to the end
+        // so it is still reachable (Cyberpunk on ReShade, #95).
+        if st.reshade && l.first().is_some_and(|s| s.engine == Engine::Opti) {
+            let o = l.remove(0);
+            l.push(o);
+        }
+        return l;
     }
     match (st.mode, st.api) {
         // ReShade cannot reach Vulkan from dxgi.dll; OptiScaler can, when the
@@ -119,7 +127,7 @@ pub fn installed(st: &GameStatus) -> Option<Setup> {
     if !st.reshade {
         return None;
     }
-    if st.sf && !st.dlss5_addon {
+    if st.sf && !st.dlss5_addon && st.consumer_dir().join(game::SF_ADDON_MARKER).is_file() {
         return Some(SF);
     }
     if st.dlss5_addon {
@@ -151,19 +159,9 @@ pub fn hand_chosen(st: &GameStatus) -> bool {
 /// top when nothing is.
 pub fn level(st: &GameStatus) -> usize {
     let l = ladder(st);
-    if let Some(n) = installed(st).and_then(|s| l.iter().position(|x| *x == s)) {
-        return n;
-    }
-    // A ReShade dxgi.dll that is not part of one of our setups (the user's
-    // own, or one a plain Remove kept): OptiScaler cannot go in over it, so a
-    // ladder that starts on OptiScaler starts at its first ReShade rung.
-    if st.reshade && l.first().is_some_and(|s| s.engine == Engine::Opti) {
-        return l
-            .iter()
-            .position(|s| s.engine == Engine::ReShade)
-            .unwrap_or(0);
-    }
-    0
+    installed(st)
+        .and_then(|s| l.iter().position(|x| *x == s))
+        .unwrap_or(0)
 }
 
 /// For a setup picked by hand, what it is, in words.
@@ -210,17 +208,21 @@ pub fn env_values(s: &Setup) -> (&'static str, Option<&'static str>) {
 }
 
 /// Hand a setup to the installer through the environment; the engine is
-/// returned for the caller.
-pub fn apply(s: &Setup) -> Engine {
+/// returned for the caller. `picked` is the picker's own choice: its build
+/// pin may give way to the driver-fault fallback (#69). A build the user
+/// chose (Advanced, or a hand-chosen install being refreshed) holds.
+pub fn apply(s: &Setup, picked: bool) -> Engine {
     let (consumer, tag) = env_values(s);
     std::env::set_var(installer::CONSUMER_ENV, consumer);
     match tag {
         Some(t) => std::env::set_var(installer::RENODX_TAG_ENV, t),
         None => std::env::remove_var(installer::RENODX_TAG_ENV),
     }
-    // The picker's build is its own choice, not the user's: the driver-fault
-    // fallback to 4.55 (#69) may still override it.
-    std::env::set_var(installer::RENODX_TAG_SOFT_ENV, "1");
+    if picked {
+        std::env::set_var(installer::RENODX_TAG_SOFT_ENV, "1");
+    } else {
+        std::env::remove_var(installer::RENODX_TAG_SOFT_ENV);
+    }
     s.engine
 }
 
@@ -309,7 +311,11 @@ mod tests {
         assert_eq!(current(&st), Some(DLSS5_NEWEST));
         st.dlss5_addon = false;
         st.sf = true;
+        // A ShortFuse add-on this tool did not place is not our step.
         assert_eq!(current(&st), Some(SF));
+        assert_eq!(installed(&st), None);
+        fs::write(t.path().join(game::SF_ADDON_MARKER), "renodx-dlss-SF-1").unwrap();
+        assert_eq!(installed(&st), Some(SF));
         st.sf = false;
         st.reshade = false;
         st.opti = true;
@@ -335,15 +341,23 @@ mod tests {
         assert_eq!(current(&st), Some(DLSS5_STEADY));
     }
 
-    /// Cyberpunk with the user's own ReShade and none of our consumers:
-    /// OptiScaler cannot go in over ReShade, so it starts on ReShade.
+    /// Cyberpunk on ReShade (the user's own, or ours) starts on ReShade and
+    /// still reaches OptiScaler as its last step.
     #[test]
-    fn a_foreign_reshade_skips_an_optiscaler_first_rung() {
+    fn cyberpunk_on_reshade_starts_on_reshade_and_ends_on_optiscaler() {
         let t = tempfile::tempdir().unwrap();
         let mut st = native(t.path());
         st.exe = t.path().join("Cyberpunk2077.exe");
         st.reshade = true;
         assert_eq!(current(&st), Some(SF));
+        assert_eq!(ladder(&st).last(), Some(&OPTI));
+        st.dlss5_addon = true;
+        fs::write(
+            t.path().join(game::DLSS5_ADDON_MARKER),
+            installer::RENODX_CLASSIC_TAG,
+        )
+        .unwrap();
+        assert_eq!(next(&st).map(|(_, s)| s), Some(OPTI));
     }
 
     #[test]

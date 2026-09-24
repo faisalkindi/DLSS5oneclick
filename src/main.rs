@@ -197,10 +197,17 @@ error: {e:#}"
                 || a.starts_with("--addon=")
                 || a.starts_with("--consumer=")
                 || a == "--check"
+                || a == "--remove"
+                || a == "--remove-all"
+                || a == "--diagnose"
+                || a == "--report"
         })
+        || args.iter().any(|a| a == "--next-setup")
+            && (std::env::var_os(installer::RENODX_TAG_ENV).is_some()
+                || std::env::var_os(installer::CONSUMER_ENV).is_some())
     {
         attach_parent_console();
-        eprintln!("error: --next-setup picks the setup itself; drop --engine=, --consumer=, --addon=, --upstream and --check.");
+        eprintln!("error: --next-setup picks the setup itself; drop --engine=, --consumer=, --addon=, --upstream, --check, --remove, --diagnose and --report, and unset DLSS5ONECLICK_RENODX_TAG / DLSS5ONECLICK_CONSUMER.");
         std::process::exit(1);
     }
     if let Some(first) = args.first().filter(|a| !a.starts_with('-')) {
@@ -365,7 +372,7 @@ fn cli(
                 } else if st.aio && !st.opti {
                     engine = installer::Engine::Aio;
                 } else if let Some(s) = setup::installed(&st) {
-                    engine = setup::apply(&s);
+                    engine = setup::apply(&s, false);
                 }
                 println!(
                     "setup: {} (chosen by hand, kept)",
@@ -377,6 +384,12 @@ fn cli(
                     eprintln!("error: none of this tool's setups fits this game.");
                     return 1;
                 }
+            }
+            if next && !setup::hand_chosen(&st) && setup::installed(&st).is_none() {
+                eprintln!(
+                    "error: nothing from this tool is installed in this game yet; run it without --next-setup first."
+                );
+                return 1;
             }
             let pick = if setup::hand_chosen(&st) {
                 None
@@ -412,7 +425,7 @@ fn cli(
                     // The switch takes the RenoDX HDR mod out; it goes back in.
                     with_renodx = with_renodx || st.renodx_mod.is_some();
                 }
-                engine = setup::apply(&s);
+                engine = setup::apply(&s, true);
                 rung = Some((n, ladder.len()));
                 println!(
                     "setup: {} (step {} of {}) - {}",

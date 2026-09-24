@@ -2729,6 +2729,14 @@ fn step_sf_cleanup(
     _w: &Path,
     progress: Progress,
 ) -> Result<Vec<String>> {
+    let addon = st.consumer_dir().join(game::SF_ADDON);
+    if addon.is_file() && !st.consumer_dir().join(game::SF_ADDON_MARKER).is_file() {
+        bail!(
+            "{} is in this game but was not placed by this tool, and two neural add-ons cannot run together. \
+             Remove it by hand, or choose ShortFuse's add-on under Advanced.",
+            game::SF_ADDON
+        );
+    }
     let mut removed = Vec::new();
     for f in [game::SF_ADDON, game::SF_ADDON_MARKER] {
         let p = st.consumer_dir().join(f);
