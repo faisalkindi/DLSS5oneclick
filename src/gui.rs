@@ -3313,6 +3313,20 @@ impl eframe::App for App {
                             .color(t::TEXT_DIM),
                         );
                     });
+                    // wilsjo2's pre-SR fork, and ShyVortex's build made from it,
+                    // hand the model colour at the working size but depth and
+                    // motion at full size below 100%, so the picture flickers
+                    // and keeps settling after the camera stops (DLSS5-Feeder
+                    // 1.17.0-beta.2 notes; fixed in jlrouzies-fr's v0.8.92).
+                    if self.working_scale < 0.99 && (self.opti_presr || self.ampere_mfg) {
+                        ui.label(
+                            RichText::new(
+                                "This OptiScaler build flickers and keeps settling after the camera stops at any model resolution below 100% (a known bug in the pre-SR fork it is built on). Pick 100% if you see that.",
+                            )
+                            .font(t::plex(11.0))
+                            .color(t::WARN),
+                        );
+                    }
                 }
                 if self.engine == Engine::ReShade {
                     ui.add_space(6.0);
