@@ -1567,7 +1567,7 @@ pub const RENODX_TAG_ENV: &str = "DLSS5ONECLICK_RENODX_TAG";
 /// on it — Dragon's Dogma 2 crashing at the first evaluate (#96), RDR2 with
 /// blown-out colour (#86), Elden Ring under Proton white (#76), Lunar Eclipse
 /// flashing (#100) — where 4.70 was what every reporter had working. It is
-/// also the last build with Enable Upscaling (#109). From 0.13.28 the default
+/// also the last build with Enable Upscaling (#109). From 0.14.0 the default
 /// is the newest stable build and this one is the fallback.
 pub const RENODX_STEADY_TAG: &str = "renodx-dlss5-4.70";
 /// The env value that asks for the newest build (the default when unset).
