@@ -570,7 +570,7 @@ impl App {
             let foreign = installer::foreign_addons(st.game_dir());
             if !foreign.is_empty() {
                 self.last_error = Some(format!(
-                    "The next setup is {}, a different engine, and switching takes ReShade out of this game, but it has ReShade add-ons this tool did not install ({}). Remove those by hand first, or choose a setup under Advanced.",
+                    "The next setup is {}, a different engine, and switching takes ReShade out of this game, but it has ReShade add-ons this tool did not install ({}). Remove those by hand first, or choose a setup under Show advanced options.",
                     setup::label(&next),
                     foreign.join(", ")
                 ));
@@ -742,7 +742,7 @@ impl App {
                 .map_err(|e| {
                     if switch_engine {
                         format!(
-                            "{e:#}\n\nThe previous setup was already taken out, so this game has none now. Press Install to set it up again from the top of its list, or open Advanced to choose one."
+                            "{e:#}\n\nThe previous setup was already taken out, so this game has none now. Press Install to set it up again from the top of its list, or open Show advanced options to choose one."
                         )
                     } else {
                         format!("{e:#}")
@@ -3241,18 +3241,22 @@ impl eframe::App for App {
                             }
                         }
                         let hand = setup::hand_chosen(g);
+                        // A real button in text the app's font can draw: the
+                        // arrow glyphs came out as empty boxes, and a frameless
+                        // grey label did not read as clickable.
                         let adv = egui::Button::new(
                             RichText::new(if self.advanced && !hand {
-                                "Advanced \u{25be}  (back to the automatic setup)"
+                                "Hide advanced options (back to the automatic setup)"
                             } else if self.advanced {
-                                "Advanced \u{25be}"
+                                "Advanced options (this setup was chosen by hand)"
                             } else {
-                                "Advanced \u{25b8}"
+                                "Show advanced options"
                             })
-                            .font(t::plex(12.0))
-                            .color(t::TEXT_MUTED),
+                            .font(t::plex_medium(12.0))
+                            .color(t::TEXT_SOFT),
                         )
-                        .frame(false);
+                        .stroke(Stroke::new(1.0, t::BORDER_STRONG))
+                        .corner_radius(CornerRadius::same(8));
                         // A setup picked by hand has no automatic one to go back
                         // to: Advanced stays open for it.
                         if ui.add_enabled(!self.running && !hand, adv).clicked() {
