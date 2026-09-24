@@ -618,7 +618,7 @@ fn dll_mentions_dgvoodoo(b: &[u8]) -> bool {
 /// BattlEye `BattlEye/BEService_x64.exe`, `Install_BattlEye.bat`, `*_BE.exe`,
 /// GameGuard `tools/GGSetup.exe` or a `GameGuard` folder, EA Javelin an
 /// `EAAntiCheat` folder or `EAAntiCheat.GameServiceLauncher.exe/.dll` beside
-/// the exe.
+/// the exe, Tencent ACE an `AntiCheatExpert` folder.
 /// A folder with thousands of entries is an asset store (extracted game
 /// archives, a texture dump), never where a DLL, an anti-cheat, or an exe
 /// lives. Crimson Desert's bin64 carried 318,000 files in two such folders
@@ -656,6 +656,12 @@ pub fn detect_anticheat(game_dir: &Path) -> Option<&'static str> {
                 // in a game nobody is competing in (#21).
                 if n == "eaanticheat" {
                     return Some("EA Javelin Anticheat");
+                }
+                // Tencent's Anti-Cheat Expert, kernel-mode. Arknights: Endfield
+                // ships it as an AntiCheatExpert folder beside the exe; with
+                // OptiScaler in place the game crashed at start (#113).
+                if n == "anticheatexpert" {
+                    return Some("Anti-Cheat Expert (ACE)");
                 }
                 if depth > 0 && !huge_dir(&p) {
                     if let Some(hit) = walk(&p, depth - 1) {
@@ -2431,6 +2437,10 @@ mod tests {
         fs::remove_dir_all(d.join("Game")).unwrap();
         fs::write(d.join("Foo_BE.exe"), b"x").unwrap();
         assert_eq!(detect_anticheat(d), Some("BattlEye"));
+        fs::remove_file(d.join("Foo_BE.exe")).unwrap();
+        // Arknights: Endfield's layout (#113).
+        fs::create_dir_all(d.join("AntiCheatExpert")).unwrap();
+        assert_eq!(detect_anticheat(d), Some("Anti-Cheat Expert (ACE)"));
     }
 
     /// Neural Upstream stands in for the RenoDX add-on, so an install that has
