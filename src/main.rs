@@ -188,6 +188,21 @@ error: {e:#}"
             std::process::exit(1);
         }
     }
+    if args.iter().any(|a| a == "--next-setup")
+        && args.iter().any(|a| {
+            a.starts_with("--engine=")
+                || a == "--opti"
+                || a == "--aio"
+                || a == "--upstream"
+                || a.starts_with("--addon=")
+                || a.starts_with("--consumer=")
+                || a == "--check"
+        })
+    {
+        attach_parent_console();
+        eprintln!("error: --next-setup picks the setup itself; drop --engine=, --consumer=, --addon=, --upstream and --check.");
+        std::process::exit(1);
+    }
     if let Some(first) = args.first().filter(|a| !a.starts_with('-')) {
         attach_parent_console();
         let code = cli(
@@ -207,7 +222,8 @@ error: {e:#}"
                 },
                 with_renodx: args.iter().any(|a| a == "--renodx"),
                 upstream: args.iter().any(|a| a == "--upstream"),
-                // Any explicit route choice turns the picker off.
+                // Any explicit route choice turns the picker off, including a
+                // build or consumer set in the environment.
                 auto: !args.iter().any(|a| {
                     a.starts_with("--engine=")
                         || a == "--opti"
@@ -215,7 +231,8 @@ error: {e:#}"
                         || a == "--upstream"
                         || a.starts_with("--addon=")
                         || a.starts_with("--consumer=")
-                }),
+                }) && std::env::var_os(installer::RENODX_TAG_ENV).is_none()
+                    && std::env::var_os(installer::CONSUMER_ENV).is_none(),
                 next: args.iter().any(|a| a == "--next-setup"),
             },
         );
@@ -325,14 +342,45 @@ fn cli(
     } else if !candidates.is_empty() {
         println!("using {}", exe.display());
     }
-    // The setup picker: the game's rung on its ladder, or the next one down.
+    // The setup picker: the rung matching what is in the folder (the top one
+    // when nothing is), or the next one down.
     let mut engine = engine;
+    let mut upstream = upstream;
     let mut rung: Option<(usize, usize)> = None;
     let mut switching_engine = false;
+    let mut with_renodx = with_renodx;
     if auto && !remove && !remove_all && !diagnose_only && !report {
-        if let Some(st) = game::inspect(&exe).ok().filter(|s| !setup::hand_chosen(s)) {
+        if let Ok(st) = game::inspect(&exe) {
             let ladder = setup::ladder(&st);
-            let pick = if next {
+            if setup::hand_chosen(&st) {
+                if next {
+                    eprintln!(
+                        "error: this game's setup was chosen by hand (Neural Upstream, the AIO, or a build its list does not carry); pick the next one with --engine= / --consumer= / --addon=."
+                    );
+                    return 1;
+                }
+                // Refresh what is there rather than replace it.
+                if st.upstream {
+                    upstream = true;
+                } else if st.aio && !st.opti {
+                    engine = installer::Engine::Aio;
+                } else if let Some(s) = setup::installed(&st) {
+                    engine = setup::apply(&s);
+                }
+                println!(
+                    "setup: {} (chosen by hand, kept)",
+                    setup::hand_label(&st).unwrap_or_default()
+                );
+            } else if ladder.is_empty() {
+                setup::clear();
+                if next {
+                    eprintln!("error: none of this tool's setups fits this game.");
+                    return 1;
+                }
+            }
+            let pick = if setup::hand_chosen(&st) {
+                None
+            } else if next {
                 match setup::next(&st) {
                     Some(p) => Some(p),
                     None => {
@@ -348,8 +396,23 @@ fn cli(
             };
             if let Some((n, s)) = pick {
                 let was = setup::current(&st).map(|c| c.engine);
-                engine = setup::apply(&s);
                 switching_engine = next && was != Some(s.engine);
+                if switching_engine {
+                    // Refuse before anything is removed: taking ReShade out
+                    // would strip add-ons this tool did not put there.
+                    let foreign = installer::foreign_addons(st.game_dir());
+                    if !foreign.is_empty() {
+                        eprintln!(
+                            "error: the next setup is {}, a different engine, and switching takes ReShade out of this game, but it has ReShade add-ons this tool did not install ({}). Remove those first, or pick a setup with --engine= / --consumer=.",
+                            setup::label(&s),
+                            foreign.join(", ")
+                        );
+                        return 1;
+                    }
+                    // The switch takes the RenoDX HDR mod out; it goes back in.
+                    with_renodx = with_renodx || st.renodx_mod.is_some();
+                }
+                engine = setup::apply(&s);
                 rung = Some((n, ladder.len()));
                 println!(
                     "setup: {} (step {} of {}) - {}",
@@ -567,9 +630,6 @@ Attach that zip to the GitHub issue.",
         &step,
     ) {
         Ok(_) => {
-            if let (Some((n, _)), Some(dir)) = (rung, exe.parent()) {
-                let _ = setup::save_level(dir, n);
-            }
             if engine == installer::Engine::Opti {
                 println!(
                     "
@@ -593,6 +653,9 @@ Done. In game: Home opens ReShade -> Add-ons tab -> DLSS 5 Neural Rendering -> e
         }
         Err(e) => {
             eprintln!("\nerror: {e:#}");
+            if switching_engine {
+                eprintln!("The previous setup was already taken out, so this game has none now. Run the same command without --next-setup to set it up again from the top of its list.");
+            }
             1
         }
     }

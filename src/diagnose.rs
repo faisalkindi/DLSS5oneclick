@@ -736,12 +736,6 @@ pub fn run(exe: &Path) -> Result<Vec<Finding>> {
     Ok(diagnose(&st))
 }
 
-/// What matiasLombo's neural-upstream (`nvngx.dll.addon64`, "DLSS5 NR
-/// Pre-Upscale") wrote to ReShade.log, read against its own source: the game's
-/// DLSS is logged as `CreateFeature id=1` (a DLSS create carries no DLSSNR
-/// slots, so `<no slot>` there is normal), every DLSS evaluate as `eval feat=`,
-/// and the add-on's own network as `2b: SNIPPET CreateFeature(18, …)` followed
-/// by `2c: NR Evaluate(…) -> 0x00000001` once it ran.
 /// ShortFuse's add-on (`renodx-dlss.addon64`), read by its own log lines.
 fn sf_findings(rs: &str) -> Vec<Finding> {
     let mut out = Vec::new();
@@ -750,10 +744,10 @@ fn sf_findings(rs: &str) -> Vec<Finding> {
         .find(|l| l.contains("Failed to load add-on") && l.contains("renodx-dlss.addon64"))
     {
         let code = l
-            .rsplit("error code ")
-            .next()
-            .unwrap_or("")
-            .trim_end_matches('!');
+            .split("error code ")
+            .nth(1)
+            .map(|c| c.trim().trim_end_matches('!'))
+            .unwrap_or("unknown");
         out.push(bad(format!(
             "ReShade refused to load renodx-dlss.addon64 (ShortFuse's add-on), error code {code}."
         )));
@@ -788,12 +782,11 @@ fn sf_findings(rs: &str) -> Vec<Finding> {
     let failed = rs.matches("NR evaluation failed").count();
     let ran: u64 = rs
         .lines()
+        // "detached signed snippet after N successful evaluations"
         .filter_map(|l| {
-            let i = l.find("after ")?;
-            let rest = &l[i + 6..];
-            rest.strip_suffix(" successful evaluations")
-                .or_else(|| rest.split(" successful evaluations").next())
-                .and_then(|n| n.trim().parse().ok())
+            let rest = l.split("snippet after ").nth(1)?;
+            let (n, _) = rest.split_once(" successful evaluations")?;
+            n.trim().parse().ok()
         })
         .max()
         .unwrap_or(0);
@@ -813,6 +806,12 @@ fn sf_findings(rs: &str) -> Vec<Finding> {
     out
 }
 
+/// What matiasLombo's neural-upstream (`nvngx.dll.addon64`, "DLSS5 NR
+/// Pre-Upscale") wrote to ReShade.log, read against its own source: the game's
+/// DLSS is logged as `CreateFeature id=1` (a DLSS create carries no DLSSNR
+/// slots, so `<no slot>` there is normal), every DLSS evaluate as `eval feat=`,
+/// and the add-on's own network as `2b: SNIPPET CreateFeature(18, …)` followed
+/// by `2c: NR Evaluate(…) -> 0x00000001` once it ran.
 fn upstream_findings(rs: &str) -> Vec<Finding> {
     let mut out = Vec::new();
     if let Some(l) = rs
@@ -1523,5 +1522,14 @@ RenoDX DLSS could not attach the direct nvngx_dlssnr.dll runtime.
         )
         .iter()
         .any(|x| x.text.contains("never attached")));
+    }
+
+    /// Only ShortFuse's own detach line counts as an evaluation total.
+    #[test]
+    fn shortfuse_evaluations_come_only_from_the_detach_line() {
+        let other = "RenoDX DLSS attached.
+retry after 30
+";
+        assert!(!sf_findings(other).iter().any(|x| x.text.contains("ran:")));
     }
 }

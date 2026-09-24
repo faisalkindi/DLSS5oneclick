@@ -1,29 +1,29 @@
 //! The setup this game gets without anyone choosing one, and what to try next.
 //!
 //! Every game has a ladder: the best setup first, then what to fall back to if
-//! it does not work there. Install uses the rung the game is on; "Try the next
-//! setup" moves it one rung down and installs that. The rung is recorded in the
-//! game folder, so the choice follows the game rather than the session.
+//! it does not work there. A game with nothing installed gets the top rung.
+//! A game that is already set up is on the rung that matches what is in its
+//! folder, read from the files themselves (the add-on and the build tag this
+//! tool recorded beside it, or the OptiScaler manifest), so Install and Update
+//! refresh what is there instead of moving it somewhere else. "Try the next
+//! setup" is the only thing that moves a game down its ladder.
 //!
 //! The order comes from what is known about each route:
-//! - ShortFuse's add-on is the RenoDX author's own neural consumer, and RHI
-//!   recommends it for games that ship their own DLSS, so it is first there.
+//! - ShortFuse's add-on is the RenoDX author's own neural consumer, made for
+//!   games that ship their own DLSS, so it is first there.
 //! - The RenoDX DLSS 5 add-on, newest stable build, then 4.70: the build every
 //!   reporter had working when 5.2.1 broke four games (#96, #86, #76, #100),
-//!   and the last one with Enable Upscaling (#109).
+//!   and the last one with Enable Upscaling (#109). Then 4.55, the build the
+//!   Feeder's host names as passing where newer ones fault in the driver (#69).
 //! - The OptiScaler engine last: a different engine altogether, and the one
 //!   that fixed Cyberpunk 2077 (#95).
 //!
-//! Games with a known answer go straight to it (`PROFILES`).
+//! Games with a known answer start further down (`PROFILES`).
 
 use std::fs;
-use std::path::Path;
 
-use crate::game::{Api, GameStatus, Mode};
+use crate::game::{self, Api, GameStatus, Mode};
 use crate::installer::{self, Consumer, Engine};
-
-/// The rung this game is on, as a number, beside the exe.
-pub const LEVEL_FILE: &str = ".dlss5oneclick-setup";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Setup {
@@ -62,17 +62,17 @@ const OPTI: Setup = Setup {
 /// Games whose reports settled the order, by exe name (lower case).
 /// Cyberpunk 2077: the ReShade route churned its feature and changed nothing;
 /// the OptiScaler engine worked for the reporter (#95). Dragon's Dogma 2: the
-/// newer DLSS 5 add-on crashed at the first evaluate where the older build ran
+/// newer DLSS 5 add-on crashed at the first evaluate where the older builds ran
 /// (#96).
 const PROFILES: &[(&str, &[Setup], &str)] = &[
     (
         "cyberpunk2077.exe",
-        &[OPTI, SF, DLSS5_NEWEST, DLSS5_STEADY],
+        &[OPTI, SF, DLSS5_NEWEST, DLSS5_STEADY, DLSS5_CLASSIC],
         "Cyberpunk 2077 works on the OptiScaler engine (#95)",
     ),
     (
         "dd2.exe",
-        &[DLSS5_STEADY, SF, DLSS5_NEWEST, OPTI],
+        &[DLSS5_STEADY, DLSS5_CLASSIC, SF, DLSS5_NEWEST, OPTI],
         "Dragon's Dogma 2 crashed on newer DLSS 5 add-on builds (#96)",
     ),
 ];
@@ -96,67 +96,139 @@ pub fn ladder(st: &GameStatus) -> Vec<Setup> {
         // game has its own DLSS for it to read.
         (Mode::Native, Api::Vulkan) if !st.is32() => vec![OPTI],
         (_, Api::Vulkan) => vec![],
-        (Mode::Native, _) if !st.is32() => vec![SF, DLSS5_NEWEST, DLSS5_STEADY, OPTI],
+        (Mode::Native, _) if !st.is32() => {
+            vec![SF, DLSS5_NEWEST, DLSS5_STEADY, DLSS5_CLASSIC, OPTI]
+        }
         // No DLSS of its own, or 32-bit: the Feeder carries it, and the DLSS 5
-        // add-on is its consumer. 4.55 is the build the Feeder's host names as
-        // passing where newer ones fault in the driver (#69).
+        // add-on is its consumer.
         _ => vec![DLSS5_NEWEST, DLSS5_STEADY, DLSS5_CLASSIC],
     }
 }
 
-/// The rung the game is on. A game this tool set up before the ladder existed
-/// has no file: an OptiScaler install stays on OptiScaler, anything else starts
-/// at the top.
-pub fn level(st: &GameStatus) -> usize {
-    let l = ladder(st);
-    let recorded = fs::read_to_string(st.game_dir().join(LEVEL_FILE))
-        .ok()
-        .and_then(|s| s.trim().parse::<usize>().ok());
-    let n = match recorded {
-        Some(n) => n,
-        None if st.opti => l.iter().position(|s| s.engine == Engine::Opti).unwrap_or(0),
-        None => 0,
-    };
-    n.min(l.len().saturating_sub(1))
+/// What this tool has in the game folder now, as a setup. `None` when nothing
+/// of ours is there, or when it is something the ladder does not carry
+/// (Neural Upstream, the standalone AIO). A DLSS 5 add-on with no recorded
+/// build predates the tag marker, from when 4.70 was the default.
+pub fn installed(st: &GameStatus) -> Option<Setup> {
+    if st.upstream || (st.aio && !st.opti) {
+        return None;
+    }
+    if st.opti {
+        return Some(OPTI);
+    }
+    if !st.reshade {
+        return None;
+    }
+    if st.sf && !st.dlss5_addon {
+        return Some(SF);
+    }
+    if st.dlss5_addon {
+        let tag = fs::read_to_string(st.consumer_dir().join(game::DLSS5_ADDON_MARKER))
+            .ok()
+            .map(|t| t.trim().to_owned());
+        return Some(match tag.as_deref() {
+            Some(t) if t == installer::RENODX_CLASSIC_TAG => DLSS5_CLASSIC,
+            Some(t) if t == installer::RENODX_STEADY_TAG => DLSS5_STEADY,
+            Some(_) => DLSS5_NEWEST,
+            None => DLSS5_STEADY,
+        });
+    }
+    None
 }
 
-/// A setup someone picked by hand before the ladder existed, which the picker
-/// must not overwrite: Neural Upstream or the standalone AIO, with no rung on
-/// record. Those stay under Advanced until the user changes them there.
+/// Something is in the folder that the ladder must not overwrite: Neural
+/// Upstream or the standalone AIO picked by hand, or a setup that is not on
+/// this game's ladder (4.55 on a profile that does not list it, say). Those
+/// are shown under Advanced and left as they are.
 pub fn hand_chosen(st: &GameStatus) -> bool {
-    !st.game_dir().join(LEVEL_FILE).is_file() && (st.upstream || (st.aio && !st.opti))
+    if st.upstream || (st.aio && !st.opti) {
+        return true;
+    }
+    installed(st).is_some_and(|s| !ladder(st).contains(&s))
+}
+
+/// The rung the game is on: where what is installed sits on its ladder, or the
+/// top when nothing is.
+pub fn level(st: &GameStatus) -> usize {
+    let l = ladder(st);
+    if let Some(n) = installed(st).and_then(|s| l.iter().position(|x| *x == s)) {
+        return n;
+    }
+    // A ReShade dxgi.dll that is not part of one of our setups (the user's
+    // own, or one a plain Remove kept): OptiScaler cannot go in over it, so a
+    // ladder that starts on OptiScaler starts at its first ReShade rung.
+    if st.reshade && l.first().is_some_and(|s| s.engine == Engine::Opti) {
+        return l
+            .iter()
+            .position(|s| s.engine == Engine::ReShade)
+            .unwrap_or(0);
+    }
+    0
+}
+
+/// For a setup picked by hand, what it is, in words.
+pub fn hand_label(st: &GameStatus) -> Option<String> {
+    if !hand_chosen(st) {
+        return None;
+    }
+    Some(if st.upstream {
+        "ReShade + Neural Upstream".to_owned()
+    } else if st.aio && !st.opti {
+        "ReShade + standalone AIO".to_owned()
+    } else {
+        installed(st).map(|s| label(&s)).unwrap_or_default()
+    })
 }
 
 /// The setup for this game now.
 pub fn current(st: &GameStatus) -> Option<Setup> {
+    if hand_chosen(st) {
+        return None;
+    }
     ladder(st).get(level(st)).copied()
 }
 
 /// The next rung, when there is one.
 pub fn next(st: &GameStatus) -> Option<(usize, Setup)> {
+    if hand_chosen(st) {
+        return None;
+    }
     let n = level(st) + 1;
     ladder(st).get(n).copied().map(|s| (n, s))
 }
 
-pub fn save_level(game_dir: &Path, n: usize) -> std::io::Result<()> {
-    fs::write(game_dir.join(LEVEL_FILE), n.to_string())
-}
-
-/// Hand a setup to the installer: its consumer and add-on build go into the
-/// environment the install steps read; the engine is returned for the caller.
-pub fn apply(s: &Setup) -> Engine {
-    std::env::set_var(
-        installer::CONSUMER_ENV,
+/// The consumer and add-on build values a setup puts in the environment the
+/// install steps read.
+pub fn env_values(s: &Setup) -> (&'static str, Option<&'static str>) {
+    (
         match s.consumer {
             Consumer::ShortFuse => "sf",
             Consumer::Dlss5 => "dlss5",
         },
-    );
-    match s.addon_tag {
+        s.addon_tag,
+    )
+}
+
+/// Hand a setup to the installer through the environment; the engine is
+/// returned for the caller.
+pub fn apply(s: &Setup) -> Engine {
+    let (consumer, tag) = env_values(s);
+    std::env::set_var(installer::CONSUMER_ENV, consumer);
+    match tag {
         Some(t) => std::env::set_var(installer::RENODX_TAG_ENV, t),
         None => std::env::remove_var(installer::RENODX_TAG_ENV),
     }
+    // The picker's build is its own choice, not the user's: the driver-fault
+    // fallback to 4.55 (#69) may still override it.
+    std::env::set_var(installer::RENODX_TAG_SOFT_ENV, "1");
     s.engine
+}
+
+/// Forget any setup handed over earlier, so the next game does not inherit it.
+pub fn clear() {
+    std::env::remove_var(installer::CONSUMER_ENV);
+    std::env::remove_var(installer::RENODX_TAG_ENV);
+    std::env::remove_var(installer::RENODX_TAG_SOFT_ENV);
 }
 
 /// What the setup is, in words.
@@ -201,26 +273,93 @@ mod tests {
     use super::*;
     use crate::game::{stub_status, Api, Mode};
 
-    #[test]
-    fn a_game_with_its_own_dlss_starts_on_shortfuse_and_falls_back_in_order() {
-        let t = tempfile::tempdir().unwrap();
+    fn native(dir: &std::path::Path) -> GameStatus {
         let mut st = stub_status(Mode::Native, Api::Dx12);
-        st.exe = t.path().join("game.exe");
-        assert_eq!(ladder(&st), vec![SF, DLSS5_NEWEST, DLSS5_STEADY, OPTI]);
-        assert_eq!(current(&st), Some(SF));
-        assert_eq!(next(&st), Some((1, DLSS5_NEWEST)));
-        save_level(t.path(), 2).unwrap();
-        assert_eq!(current(&st), Some(DLSS5_STEADY));
-        save_level(t.path(), 3).unwrap();
-        assert_eq!(current(&st), Some(OPTI));
-        assert_eq!(next(&st), None);
-        // A number past the end stays on the last rung.
-        save_level(t.path(), 9).unwrap();
-        assert_eq!(current(&st), Some(OPTI));
+        st.exe = dir.join("game.exe");
+        st
     }
 
     #[test]
-    fn feeder_32_bit_vulkan_and_profiles_get_their_own_ladders() {
+    fn a_fresh_game_with_its_own_dlss_starts_on_shortfuse() {
+        let t = tempfile::tempdir().unwrap();
+        let st = native(t.path());
+        assert_eq!(
+            ladder(&st),
+            vec![SF, DLSS5_NEWEST, DLSS5_STEADY, DLSS5_CLASSIC, OPTI]
+        );
+        assert_eq!(current(&st), Some(SF));
+        assert_eq!(next(&st), Some((1, DLSS5_NEWEST)));
+    }
+
+    /// What is in the folder decides the rung, so Install and Update refresh
+    /// the build a user is on (including one they pinned) instead of moving it.
+    #[test]
+    fn an_existing_install_stays_on_the_setup_it_has() {
+        let t = tempfile::tempdir().unwrap();
+        let mut st = native(t.path());
+        st.reshade = true;
+        st.dlss5_addon = true;
+        // No tag recorded: from when 4.70 was the default.
+        assert_eq!(current(&st), Some(DLSS5_STEADY));
+        let m = t.path().join(game::DLSS5_ADDON_MARKER);
+        fs::write(&m, installer::RENODX_CLASSIC_TAG).unwrap();
+        assert_eq!(current(&st), Some(DLSS5_CLASSIC));
+        assert_eq!(next(&st), Some((4, OPTI)));
+        fs::write(&m, "renodx-dlss5-6.5.3").unwrap();
+        assert_eq!(current(&st), Some(DLSS5_NEWEST));
+        st.dlss5_addon = false;
+        st.sf = true;
+        assert_eq!(current(&st), Some(SF));
+        st.sf = false;
+        st.reshade = false;
+        st.opti = true;
+        assert_eq!(current(&st), Some(OPTI));
+        assert_eq!(next(&st), None);
+    }
+
+    /// Cyberpunk on ReShade stays on ReShade: the profile's OptiScaler rung is
+    /// for a fresh install, not a reason to run OptiScaler over ReShade.
+    #[test]
+    fn a_profile_does_not_move_an_existing_install() {
+        let t = tempfile::tempdir().unwrap();
+        let mut st = native(t.path());
+        st.exe = t.path().join("Cyberpunk2077.exe");
+        assert_eq!(current(&st), Some(OPTI));
+        st.reshade = true;
+        st.dlss5_addon = true;
+        assert_eq!(current(&st), Some(DLSS5_STEADY));
+        assert!(reason(&st).contains("#95"));
+        st.exe = t.path().join("DD2.exe");
+        st.dlss5_addon = false;
+        st.reshade = false;
+        assert_eq!(current(&st), Some(DLSS5_STEADY));
+    }
+
+    /// Cyberpunk with the user's own ReShade and none of our consumers:
+    /// OptiScaler cannot go in over ReShade, so it starts on ReShade.
+    #[test]
+    fn a_foreign_reshade_skips_an_optiscaler_first_rung() {
+        let t = tempfile::tempdir().unwrap();
+        let mut st = native(t.path());
+        st.exe = t.path().join("Cyberpunk2077.exe");
+        st.reshade = true;
+        assert_eq!(current(&st), Some(SF));
+    }
+
+    #[test]
+    fn a_hand_picked_setup_is_named() {
+        let t = tempfile::tempdir().unwrap();
+        let mut st = native(t.path());
+        assert_eq!(hand_label(&st), None);
+        st.upstream = true;
+        assert_eq!(
+            hand_label(&st).as_deref(),
+            Some("ReShade + Neural Upstream")
+        );
+    }
+
+    #[test]
+    fn feeder_32_bit_and_vulkan_get_their_own_ladders() {
         let t = tempfile::tempdir().unwrap();
         let mut st = stub_status(Mode::Feeder, Api::Dx11);
         st.exe = t.path().join("game.exe");
@@ -233,47 +372,30 @@ mod tests {
         assert_eq!(ladder(&st), vec![OPTI]);
         st.mode = Mode::Feeder;
         assert!(ladder(&st).is_empty());
-        st.mode = Mode::Native;
-        st.api = Api::Dx12;
-        st.exe = t.path().join("Cyberpunk2077.exe");
-        assert_eq!(current(&st), Some(OPTI));
-        assert!(reason(&st).contains("#95"));
-        st.exe = t.path().join("DD2.exe");
-        assert_eq!(current(&st), Some(DLSS5_STEADY));
+        assert_eq!(current(&st), None);
     }
 
     #[test]
-    fn neural_upstream_and_aio_picked_by_hand_are_left_alone() {
+    fn neural_upstream_and_aio_are_left_alone() {
         let t = tempfile::tempdir().unwrap();
-        let mut st = stub_status(Mode::Native, Api::Dx12);
-        st.exe = t.path().join("game.exe");
+        let mut st = native(t.path());
         assert!(!hand_chosen(&st));
         st.upstream = true;
         assert!(hand_chosen(&st));
-        save_level(t.path(), 0).unwrap();
-        assert!(!hand_chosen(&st));
+        assert_eq!(current(&st), None);
+        assert_eq!(next(&st), None);
+        st.upstream = false;
+        st.aio = true;
+        assert!(hand_chosen(&st));
     }
 
     #[test]
-    fn an_optiscaler_install_from_before_the_ladder_stays_on_optiscaler() {
-        let t = tempfile::tempdir().unwrap();
-        let mut st = stub_status(Mode::Native, Api::Dx12);
-        st.exe = t.path().join("game.exe");
-        st.opti = true;
-        assert_eq!(current(&st), Some(OPTI));
-    }
-
-    #[test]
-    fn apply_hands_the_consumer_and_build_to_the_installer() {
-        assert_eq!(apply(&DLSS5_STEADY), Engine::ReShade);
-        assert_eq!(installer::consumer(), Consumer::Dlss5);
+    fn env_values_name_the_consumer_and_the_build() {
+        assert_eq!(env_values(&SF), ("sf", None));
         assert_eq!(
-            std::env::var(installer::RENODX_TAG_ENV).as_deref(),
-            Ok(installer::RENODX_STEADY_TAG)
+            env_values(&DLSS5_STEADY),
+            ("dlss5", Some(installer::RENODX_STEADY_TAG))
         );
-        assert_eq!(apply(&SF), Engine::ReShade);
-        assert_eq!(installer::consumer(), Consumer::ShortFuse);
-        assert!(std::env::var(installer::RENODX_TAG_ENV).is_err());
-        std::env::remove_var(installer::CONSUMER_ENV);
+        assert_eq!(env_values(&DLSS5_NEWEST), ("dlss5", None));
     }
 }

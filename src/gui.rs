@@ -364,61 +364,98 @@ impl App {
                     m.lines()
                         .any(|l| l.trim() == format!("# repo {}", installer::OPTI_UNLOCKED_REPO))
                 });
-            // Same for the add-on build ticks: the tag recorded beside the
-            // add-on says which build is in, so the ticks come back the way
-            // the last Install left them instead of clearing on every
-            // reselect (#101).
-            let tag = self
-                .status
+            self.sync_setup(true);
+            // OptiScaler's per-game choices come from that game's folder, not
+            // from whatever game was open before: the pre-SR build from the
+            // manifest's repo line, frame generation and the model resolution
+            // from its OptiScaler.ini.
+            let st = self.status.as_ref().and_then(|r| r.as_ref().ok()).cloned();
+            let manifest = st
                 .as_ref()
-                .and_then(|r| r.as_ref().ok())
-                .and_then(|s| {
-                    std::fs::read_to_string(s.consumer_dir().join(game::DLSS5_ADDON_MARKER)).ok()
-                })
-                .map(|t| t.trim().to_owned());
-            let _ = tag;
-            // The Advanced controls start where the picker would put this
-            // game, so opening Advanced shows what Install is about to do.
-            let pick = self
-                .status
+                .and_then(|s| std::fs::read_to_string(s.game_dir().join(game::OPTI_MANIFEST)).ok())
+                .unwrap_or_default();
+            self.opti_presr = manifest
+                .lines()
+                .any(|l| l.trim() == format!("# repo {}", installer::OPTI_PRESR_REPO));
+            let ini = st
                 .as_ref()
-                .and_then(|r| r.as_ref().ok())
-                .and_then(setup::current);
-            let hand = self
-                .status
-                .as_ref()
-                .and_then(|r| r.as_ref().ok())
-                .map(|s| (setup::hand_chosen(s), s.upstream, s.aio));
-            if let Some((true, up, aio)) = hand {
-                // Picked by hand before the picker existed: show it as it is.
-                self.advanced = true;
-                self.upstream_on = up;
-                if aio {
-                    self.engine = Engine::Aio;
+                .and_then(|s| std::fs::read_to_string(s.game_dir().join(installer::OPTI_INI)).ok())
+                .unwrap_or_default();
+            self.opti_fg = installer::ini_value(&ini, "FrameGen", "Enabled")
+                .is_some_and(|v| v.eq_ignore_ascii_case("true"))
+                && installer::ini_value(&ini, "FrameGen", "FGOutput")
+                    .is_some_and(|v| v.eq_ignore_ascii_case("fsrfg"));
+            // Model resolution: what the game already runs at, else 75% on
+            // RTX 20/30 (the full-size pass costs them the most frame time and
+            // input latency, #112), except on the pre-SR and RTX 20/30 builds,
+            // which flicker below 100%.
+            let recorded = installer::ini_value(&ini, "DlssNr", "WorkingScale")
+                .and_then(|v| v.parse::<f32>().ok())
+                .filter(|v| (0.25..=2.0).contains(v));
+            let tier = st.as_ref().and_then(|s| s.gpu.as_ref().map(|(_, t)| *t));
+            self.working_scale = match recorded {
+                Some(v) => v,
+                None if tier == Some(crate::gpu::Tier::Rtx2030)
+                    && !self.opti_presr
+                    && !self.ampere_mfg =>
+                {
+                    0.75
                 }
-            } else if let Some(p) = pick {
-                self.advanced = false;
-                self.engine = p.engine;
-                self.consumer = p.consumer;
-                self.upstream_on = false;
-                self.renodx_classic = p.addon_tag == Some(installer::RENODX_CLASSIC_TAG);
-                self.renodx_steady = p.addon_tag == Some(installer::RENODX_STEADY_TAG);
-            }
-            // RTX 20/30 run the model at 75% by default: the pass at full size
-            // costs them the most frame time and input latency (#112).
-            let tier = self
-                .status
-                .as_ref()
-                .and_then(|r| r.as_ref().ok())
-                .and_then(|s| s.gpu.as_ref().map(|(_, t)| *t));
-            self.working_scale = if tier == Some(crate::gpu::Tier::Rtx2030) {
-                0.75
-            } else {
-                1.0
+                None => 1.0,
             };
             self.start_renodx_lookup();
+        } else if !self.advanced {
+            self.sync_setup(false);
         }
         self.reload_knobs_and_perf();
+    }
+
+    /// Put the setup controls where this game is: the picker's setup, or,
+    /// for a setup picked by hand, what is installed. `first` is a newly
+    /// opened game, which also decides whether Advanced opens; afterwards
+    /// (after an install, or when Advanced closes) only the picker's setup is
+    /// re-read, so the tiles and the Advanced controls never lag behind what
+    /// Install will do.
+    fn sync_setup(&mut self, first: bool) {
+        let Some(st) = self.status.as_ref().and_then(|r| r.as_ref().ok()).cloned() else {
+            return;
+        };
+        // The build ticks come back the way the last Install left them (#101).
+        let tag = std::fs::read_to_string(st.consumer_dir().join(game::DLSS5_ADDON_MARKER))
+            .ok()
+            .map(|t| t.trim().to_owned());
+        if setup::hand_chosen(&st) {
+            if first {
+                self.advanced = true;
+            }
+            self.upstream_on = st.upstream;
+            self.consumer = installer::Consumer::Dlss5;
+            self.engine = if st.opti {
+                Engine::Opti
+            } else if st.aio {
+                Engine::Aio
+            } else {
+                Engine::ReShade
+            };
+            self.renodx_classic = tag.as_deref() == Some(installer::RENODX_CLASSIC_TAG);
+            self.renodx_steady = tag.as_deref() == Some(installer::RENODX_STEADY_TAG);
+        } else if let Some(p) = setup::current(&st) {
+            if first {
+                self.advanced = false;
+            }
+            self.engine = p.engine;
+            self.consumer = p.consumer;
+            self.upstream_on = false;
+            self.renodx_classic = p.addon_tag == Some(installer::RENODX_CLASSIC_TAG);
+            self.renodx_steady = p.addon_tag == Some(installer::RENODX_STEADY_TAG);
+        } else if first {
+            // Nothing on the ladder fits (a Vulkan game with no DLSS of its
+            // own): nothing from the previous game carries over.
+            self.advanced = false;
+            self.engine = Engine::ReShade;
+            self.upstream_on = false;
+            self.consumer = installer::Consumer::Dlss5;
+        }
     }
 
     fn reload_knobs_and_perf(&mut self) {
@@ -518,19 +555,32 @@ impl App {
             return;
         };
         let switch = setup::current(st).map(|c| c.engine) != Some(next.engine);
+        if switch {
+            // Taking ReShade out would strip add-ons this tool did not put
+            // there, and OptiScaler cannot go in beside ReShade: say so first,
+            // before anything is removed.
+            let foreign = installer::foreign_addons(st.game_dir());
+            if !foreign.is_empty() {
+                self.last_error = Some(format!(
+                    "The next setup is {}, a different engine, and switching takes ReShade out of this game, but it has ReShade add-ons this tool did not install ({}). Remove those by hand first, or choose a setup under Advanced.",
+                    setup::label(&next),
+                    foreign.join(", ")
+                ));
+                return;
+            }
+        }
+        let _ = n;
         self.advanced = false;
-        self.start_with(None, Some((n, next, switch)));
+        self.start_with(None, Some((next, switch)));
     }
 
-    fn start_with(&mut self, remove: Option<bool>, forced: Option<(usize, setup::Setup, bool)>) {
+    fn start_with(&mut self, remove: Option<bool>, forced: Option<(setup::Setup, bool)>) {
         let Some(exe) = self.exe() else { return };
         let mut engine = self.engine;
-        let with_renodx = self.renodx_on;
-        let mut upstream = self.upstream_on;
-        // Advanced closed: the picker's setup, and its rung saved on success.
-        // Open: what the controls say, saved as a rung when it is one.
         let st = self.status.as_ref().and_then(|r| r.as_ref().ok()).cloned();
-        let mut rung: Option<usize> = None;
+        let mut with_renodx = self.renodx_on;
+        let mut upstream = self.upstream_on;
+        // Advanced closed: the picker's setup. Open: what the controls say.
         let mut switch_engine = false;
         std::env::set_var(
             installer::WORKING_SCALE_ENV,
@@ -554,31 +604,34 @@ impl App {
             None
         };
         match (&forced, &st) {
-            (Some((n, s, sw)), _) => {
+            (Some((s, sw)), _) => {
                 engine = setup::apply(s);
                 upstream = false;
-                rung = Some(*n);
                 switch_engine = *sw;
             }
-            (None, Some(g)) if remove.is_none() && !self.advanced => {
-                if let Some(s) = setup::current(g) {
+            (None, Some(g)) if remove.is_none() && !self.advanced => match setup::current(g) {
+                Some(s) => {
                     engine = setup::apply(&s);
                     upstream = false;
-                    rung = Some(setup::level(g));
                 }
-            }
+                // Nothing on the ladder fits: install nothing the previous
+                // game's choice would have picked.
+                None => setup::clear(),
+            },
             _ => {
-                let manual = setup::Setup {
+                setup::apply(&setup::Setup {
                     engine,
                     consumer: self.consumer,
                     addon_tag: manual_tag,
-                };
-                setup::apply(&manual);
-                rung = st
-                    .as_ref()
-                    .filter(|_| !upstream)
-                    .and_then(|g| setup::ladder(g).iter().position(|x| *x == manual));
+                });
             }
+        }
+        // A switch takes the RenoDX HDR mod out with everything else; put it
+        // back on the new setup when it was there. Only then: re-running the
+        // mod step on every Install would fail the install whenever the mod
+        // lookup does.
+        if switch_engine && st.as_ref().is_some_and(|g| g.renodx_mod.is_some()) {
+            with_renodx = true;
         }
         if self.ada_mfg {
             std::env::set_var(installer::ADA_MFG_ENV, "1");
@@ -646,8 +699,7 @@ impl App {
                         return;
                     }
                 }
-                let saved_exe = exe.clone();
-                let result = installer::run_all(
+                installer::run_all(
                     &exe,
                     engine,
                     with_renodx,
@@ -675,13 +727,15 @@ impl App {
                         "Done. In game: Home opens ReShade → Add-ons tab → DLSS 5 Neural Rendering → enable. (Home tab saying \"no effect files\" is normal on games with their own DLSS.)".to_owned()
                     }
                 })
-                .map_err(|e| format!("{e:#}"));
-                if result.is_ok() {
-                    if let (Some(n), Some(d)) = (rung, saved_exe.parent()) {
-                        let _ = setup::save_level(d, n);
+                .map_err(|e| {
+                    if switch_engine {
+                        format!(
+                            "{e:#}\n\nThe previous setup was already taken out, so this game has none now. Press Install to set it up again from the top of its list, or open Advanced to choose one."
+                        )
+                    } else {
+                        format!("{e:#}")
                     }
-                }
-                result
+                })
             };
             let _ = tx.send(Msg::Finished(out));
         });
@@ -2384,8 +2438,8 @@ fn about_page(ui: &mut egui::Ui) {
             "https://github.com/umar-afzaal/LumeniteFX",
         ),
         (
-            "RankFTW — RHI and rhi-repo",
-            "https://github.com/RankFTW/RHI",
+            "RankFTW — rhi-repo (DLSS 5 add-on and NVIDIA runtimes)",
+            "https://github.com/RankFTW/rhi-repo",
         ),
         (
             "NIGos — dlss5-bridge",
@@ -3101,7 +3155,18 @@ impl eframe::App for App {
                                 .font(t::plex_semibold(11.0))
                                 .color(t::TEXT_MUTED),
                         );
+                        let hand = setup::hand_label(g);
                         match setup::current(g) {
+                            _ if hand.is_some() => {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "chosen by hand: {}",
+                                        hand.clone().unwrap_or_default()
+                                    ))
+                                    .font(t::plex_medium(13.0))
+                                    .color(t::TEXT_SOFT),
+                                );
+                            }
                             Some(p) if !self.advanced => {
                                 ui.label(
                                     RichText::new(setup::label(&p))
@@ -3163,9 +3228,12 @@ impl eframe::App for App {
                                 }
                             }
                         }
+                        let hand = setup::hand_chosen(g);
                         let adv = egui::Button::new(
-                            RichText::new(if self.advanced {
+                            RichText::new(if self.advanced && !hand {
                                 "Advanced \u{25be}  (back to the automatic setup)"
+                            } else if self.advanced {
+                                "Advanced \u{25be}"
                             } else {
                                 "Advanced \u{25b8}"
                             })
@@ -3173,16 +3241,23 @@ impl eframe::App for App {
                             .color(t::TEXT_MUTED),
                         )
                         .frame(false);
-                        if ui.add_enabled(!self.running, adv).clicked() {
+                        // A setup picked by hand has no automatic one to go back
+                        // to: Advanced stays open for it.
+                        if ui.add_enabled(!self.running && !hand, adv).clicked() {
                             self.advanced = !self.advanced;
                             if !self.advanced {
                                 // Closing Advanced returns to the picker's setup.
-                                self.inspect_resolved();
+                                self.sync_setup(false);
                             }
                         }
                     });
                 }
-                if self.advanced && self.engine == Engine::ReShade {
+                if self.advanced
+                    && self.engine == Engine::ReShade
+                    && !self.upstream_on
+                    && (self.consumer == installer::Consumer::Dlss5
+                        || ok_status.as_ref().is_some_and(|s| s.mode == game::Mode::Feeder || s.is32()))
+                {
                     // Driver 616.64 faults inside NGX with newer add-on builds;
                     // the classic one is the way through there (#69).
                     let mut on = self.renodx_classic;
@@ -3459,6 +3534,10 @@ impl eframe::App for App {
                         );
                         if ui.add_enabled(!self.running, cb).changed() {
                             self.ampere_mfg = on;
+                            // That build flickers below 100% model resolution.
+                            if on {
+                                self.working_scale = 1.0;
+                            }
                         }
                         if self.ampere_mfg {
                             ui.label(

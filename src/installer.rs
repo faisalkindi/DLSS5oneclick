@@ -336,6 +336,17 @@ pub struct Latest {
 
 impl Latest {
     pub fn fetch(client: &Client) -> Self {
+        // One request for the rhi-repo list, read for every prefix; the
+        // unauthenticated API allows 60 an hour and this runs after every card
+        // install. The HTML pages are the fallback when the list fails.
+        let list = net::get_json_github(client, RHI_RELEASES).ok();
+        let rhi = |client: &Client, prefix: &str| -> Option<String> {
+            list.as_ref()
+                .and_then(|l| l.as_array())
+                .and_then(|a| pick_latest_asset(a, prefix).ok())
+                .map(|(t, _)| t)
+                .or_else(|| rhi_newest(client, prefix).ok().map(|(t, _)| t))
+        };
         Latest {
             reshade: resolve_reshade_setup(client).ok().map(|(v, _)| v),
             feeder: net::latest_tag(client, FEEDER_REPO).ok(),
@@ -345,11 +356,11 @@ impl Latest {
             // Same source order as the install: NVIDIA's tag, else the mirror's.
             dlss: nvidia_dll(client, game::DLSS_DLL)
                 .map(|(t, _)| t)
-                .or_else(|| rhi_latest(client, "dlss-").ok().map(|(t, _)| t)),
-            dlssnr: rhi_latest(client, "dlssnr-").ok().map(|(t, _)| t),
+                .or_else(|| rhi(client, "dlss-")),
+            dlssnr: rhi(client, "dlssnr-"),
             aio: net::latest_tag(client, AIO_REPO).ok(),
-            sf: rhi_newest(client, SF_PREFIX).ok().map(|(t, _)| t),
-            dlss5: rhi_newest(client, DLSS5_PREFIX).ok().map(|(t, _)| t),
+            sf: rhi(client, SF_PREFIX),
+            dlss5: rhi(client, DLSS5_PREFIX),
         }
     }
 }
@@ -462,7 +473,9 @@ pub fn stale_components(dir: &Path, latest: &Latest) -> Vec<String> {
             &latest.sf,
         );
     }
-    if let Some(have) = mine(game::DLSS5_ADDON_MARKER) {
+    if let Some(have) =
+        mine(game::DLSS5_ADDON_MARKER).filter(|_| dir.join(game::DLSS5_ADDON).is_file())
+    {
         let h = have.trim();
         if h != RENODX_STEADY_TAG && h != RENODX_CLASSIC_TAG {
             check("DLSS 5 add-on", Some(have), &latest.dlss5);
@@ -1200,7 +1213,7 @@ pub fn set_dlss_nr_enabled(ini: &str) -> Option<String> {
 /// missing; `None` when it already reads that way. Section-scoped because
 /// OptiScaler.ini repeats names like `Enabled` under many headings.
 /// The value of `key` in `section`, as written in `ini`.
-fn ini_value(ini: &str, section: &str, key: &str) -> Option<String> {
+pub fn ini_value(ini: &str, section: &str, key: &str) -> Option<String> {
     let header = format!("[{section}]");
     let mut in_section = false;
     for line in ini.lines() {
@@ -1425,6 +1438,11 @@ fn plan_reshade_consumer_with(st: &GameStatus, upstream: bool, c: Consumer) -> V
             if st.is32() {
                 v.push(STEP_HOST_RESHADE);
             }
+            // Two neural consumers cannot run together; a ShortFuse add-on
+            // left from a native-mode install goes.
+            if st.sf {
+                v.push(STEP_SF_CLEANUP);
+            }
             v.extend([
                 STEP_HEADERS,
                 STEP_FEEDER,
@@ -1554,6 +1572,10 @@ pub const RENODX_TAG_ENV: &str = "DLSS5ONECLICK_RENODX_TAG";
 pub const RENODX_STEADY_TAG: &str = "renodx-dlss5-4.70";
 /// The env value that asks for the newest build (the default when unset).
 pub const RENODX_LATEST: &str = "latest";
+/// Set beside `RENODX_TAG_ENV` when the setup picker chose the build rather
+/// than the user: a picker's 4.70 still gives way to 4.55 on a machine whose
+/// log reports the newer builds faulting in the driver (#69).
+pub const RENODX_TAG_SOFT_ENV: &str = "DLSS5ONECLICK_RENODX_TAG_SOFT";
 
 /// What `DLSS5ONECLICK_RENODX_TAG` resolves to: `Some(tag)` to pin, `None`
 /// for the newest stable build.
@@ -1567,6 +1589,13 @@ pub fn renodx_tag_choice(env: Option<&str>) -> Option<String> {
 
 pub const DLSS5_PREFIX: &str = "renodx-dlss5-";
 pub const SF_PREFIX: &str = "renodx-dlss-SF-";
+
+/// Whether a DLSS 5 add-on build was pinned by the user (a tag set, and not
+/// by the setup picker). Only a user's pin holds against the driver-fault
+/// fallback to 4.55 (#69).
+fn pin_is_users(tag_set: bool, set_by_picker: bool) -> bool {
+    tag_set && !set_by_picker
+}
 
 /// The newest stable rhi-repo build for `prefix`, ignoring any pin.
 pub fn rhi_newest(client: &Client, prefix: &str) -> Result<(String, String)> {
@@ -2308,7 +2337,11 @@ fn step_dlss5(
     // lives in host64\ and is fetched by this same loop, and its host is the
     // very thing that prints the verdict. sempie27's GTA IV kept getting v4.7
     // back while its own log said v4.7 faults on this driver (#69).
-    let auto_classic = std::env::var_os(RENODX_TAG_ENV).is_none() && addon_faulted_in_driver(&cdir);
+    let user_pinned = pin_is_users(
+        std::env::var_os(RENODX_TAG_ENV).is_some(),
+        std::env::var_os(RENODX_TAG_SOFT_ENV).is_some(),
+    );
+    let auto_classic = !user_pinned && addon_faulted_in_driver(&cdir);
     if auto_classic {
         std::env::set_var(RENODX_TAG_ENV, RENODX_CLASSIC_TAG);
     }
@@ -2636,6 +2669,10 @@ fn step_dlss5_cleanup(
     progress: Progress,
 ) -> Result<Vec<String>> {
     let mut removed = Vec::new();
+    let marker = st.consumer_dir().join(game::DLSS5_ADDON_MARKER);
+    if marker.is_file() {
+        fs::remove_file(&marker)?;
+    }
     let f = st.consumer_dir().join(game::DLSS5_ADDON);
     if f.is_file() {
         fs::remove_file(&f)?;
@@ -2732,7 +2769,14 @@ fn step_replaced_cleanup(
             removed.push(f.to_owned());
         }
     }
-    progress(100, "nothing left over for ShortFuse's add-on to replace");
+    progress(
+        100,
+        if removed.is_empty() {
+            "nothing left over for ShortFuse's add-on to replace"
+        } else {
+            "add-ons ShortFuse's replaces removed"
+        },
+    );
     Ok(removed)
 }
 
@@ -3326,11 +3370,7 @@ pub fn uninstall(exe: &Path) -> Result<Vec<String>> {
         d.join(game::FEEDER_ADDON),
         d.join(game::DLSS5_ADDON),
         d.join(game::DLSS5_ADDON_MARKER),
-        d.join(game::SF_ADDON),
         d.join(game::SF_ADDON_MARKER),
-        // The setup rung goes too: after Remove the game starts again at the
-        // top of its ladder.
-        d.join(crate::setup::LEVEL_FILE),
         d.join(game::DLSSNR_DLL),
         d.join(game::BRIDGE_ADDON),
         d.join(game::UPSTREAM_ADDON),
@@ -3354,6 +3394,11 @@ pub fn uninstall(exe: &Path) -> Result<Vec<String>> {
     }
     if d.join(game::DLSS_MARKER).is_file() {
         targets.push(d.join(game::DLSS_DLL));
+    }
+    // ShortFuse's add-on only when this tool placed it: Install leaves one it
+    // did not place alone, and Remove does the same.
+    if d.join(game::SF_ADDON_MARKER).is_file() {
+        targets.push(d.join(game::SF_ADDON));
     }
     // The frame-generation provider: ours goes, and the game's own comes back
     // from .original if we moved it aside (#90). The restore happens below,
@@ -3461,6 +3506,38 @@ pub fn uninstall(exe: &Path) -> Result<Vec<String>> {
         removed.push(format!("{}/", game::HOST_DIR));
     }
     Ok(removed)
+}
+
+/// ReShade add-ons in `d` that this tool's Remove would not take out: the ones
+/// someone else put there. Remove incl. ReShade keeps ReShade for them, and a
+/// switch of engine refuses rather than strip the game.
+pub fn foreign_addons(d: &Path) -> Vec<String> {
+    let ours = [
+        game::DLSS5_ADDON,
+        game::BRIDGE_ADDON,
+        game::UPSTREAM_ADDON,
+        game::MFG_ADDON,
+        game::FEEDER_ADDON,
+        game::FEEDER_ADDON32,
+        "dlss5-dx11-bridge.addon64",
+    ];
+    let renodx_ours = fs::read_to_string(d.join(game::RENODX_MANIFEST))
+        .ok()
+        .map(|s| s.trim().to_ascii_lowercase());
+    let sf_ours = d.join(game::SF_ADDON_MARKER).is_file();
+    let mut v: Vec<String> = fs::read_dir(d)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.file_name().to_string_lossy().to_lowercase())
+                .filter(|n| n.ends_with(".addon64") || n.ends_with(".addon32"))
+                .filter(|n| !ours.iter().any(|o| o.eq_ignore_ascii_case(n)))
+                .filter(|n| !(sf_ours && n.eq_ignore_ascii_case(game::SF_ADDON)))
+                .filter(|n| renodx_ours.as_deref() != Some(n.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort();
+    v
 }
 
 /// `uninstall`, then ReShade itself (`dxgi.dll` + ini/logs).
@@ -5133,5 +5210,35 @@ AmpereMfgUnlock=true
         );
         assert!(prerelease_tag_name("renodx-dlss5-7.0.0-rc1"));
         assert!(!prerelease_tag_name("dlssnr-310.8.SF-v2"));
+    }
+
+    /// Add-ons this tool placed are not "foreign"; anything else is, including
+    /// a ShortFuse add-on this tool did not put there.
+    #[test]
+    fn foreign_addons_are_the_ones_this_tool_did_not_place() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path();
+        for f in [game::DLSS5_ADDON, game::BRIDGE_ADDON, game::SF_ADDON] {
+            fs::write(d.join(f), b"x").unwrap();
+        }
+        assert_eq!(foreign_addons(d), vec![game::SF_ADDON.to_owned()]);
+        fs::write(d.join(game::SF_ADDON_MARKER), b"renodx-dlss-SF-1").unwrap();
+        assert!(foreign_addons(d).is_empty());
+        fs::write(d.join("renodx-somegame.addon64"), b"x").unwrap();
+        assert_eq!(
+            foreign_addons(d),
+            vec!["renodx-somegame.addon64".to_owned()]
+        );
+        fs::write(d.join(game::RENODX_MANIFEST), b"renodx-somegame.addon64").unwrap();
+        assert!(foreign_addons(d).is_empty());
+    }
+
+    /// The picker's 4.70 gives way to the driver-fault fallback; a user's pin
+    /// does not (#69).
+    #[test]
+    fn only_a_users_pin_holds_against_the_driver_fault_fallback() {
+        assert!(!pin_is_users(false, false));
+        assert!(pin_is_users(true, false));
+        assert!(!pin_is_users(true, true));
     }
 }
