@@ -16,6 +16,7 @@ mod renodx;
 mod report;
 mod reshade_ini;
 mod settings;
+mod setup;
 mod text;
 mod theme;
 mod update;
@@ -162,13 +163,23 @@ error: {e:#}"
         }
     }
     if let Some(a) = args.iter().find_map(|a| a.strip_prefix("--addon=")) {
-        // "latest" lifts the 4.70 default; a bare number becomes a tag.
+        // "latest" is the newest stable build; a bare number becomes a tag.
         let v = if a.eq_ignore_ascii_case("latest") || a.starts_with("renodx-dlss5-") {
             a.to_owned()
         } else {
             format!("renodx-dlss5-{a}")
         };
         std::env::set_var(installer::RENODX_TAG_ENV, v);
+    }
+    if let Some(c) = args.iter().find_map(|a| a.strip_prefix("--consumer=")) {
+        if !["sf", "shortfuse", "dlss5"]
+            .iter()
+            .any(|v| c.eq_ignore_ascii_case(v))
+        {
+            eprintln!("error: --consumer must be sf or dlss5");
+            std::process::exit(1);
+        }
+        std::env::set_var(installer::CONSUMER_ENV, c);
     }
     if let Some(a) = args.iter().find_map(|a| a.strip_prefix("--api=")) {
         std::env::set_var(game::API_ENV, a);
@@ -196,6 +207,16 @@ error: {e:#}"
                 },
                 with_renodx: args.iter().any(|a| a == "--renodx"),
                 upstream: args.iter().any(|a| a == "--upstream"),
+                // Any explicit route choice turns the picker off.
+                auto: !args.iter().any(|a| {
+                    a.starts_with("--engine=")
+                        || a == "--opti"
+                        || a == "--aio"
+                        || a == "--upstream"
+                        || a.starts_with("--addon=")
+                        || a.starts_with("--consumer=")
+                }),
+                next: args.iter().any(|a| a == "--next-setup"),
             },
         );
         std::process::exit(code);
@@ -257,6 +278,10 @@ struct Choice {
     engine: installer::Engine,
     with_renodx: bool,
     upstream: bool,
+    /// Nothing about the route was asked for: the setup picker decides.
+    auto: bool,
+    /// `--next-setup`: move this game one rung down its ladder and install that.
+    next: bool,
 }
 
 fn cli(
@@ -272,6 +297,8 @@ fn cli(
         engine,
         with_renodx,
         upstream,
+        auto,
+        next,
     } = choice;
     let (exe, candidates) = match game::resolve_target(&target) {
         Ok(v) => v,
@@ -297,6 +324,42 @@ fn cli(
         );
     } else if !candidates.is_empty() {
         println!("using {}", exe.display());
+    }
+    // The setup picker: the game's rung on its ladder, or the next one down.
+    let mut engine = engine;
+    let mut rung: Option<(usize, usize)> = None;
+    let mut switching_engine = false;
+    if auto && !remove && !remove_all && !diagnose_only && !report {
+        if let Some(st) = game::inspect(&exe).ok().filter(|s| !setup::hand_chosen(s)) {
+            let ladder = setup::ladder(&st);
+            let pick = if next {
+                match setup::next(&st) {
+                    Some(p) => Some(p),
+                    None => {
+                        eprintln!(
+                            "error: this game is on the last setup there is ({}); nothing further to try.",
+                            setup::current(&st).map(|s| setup::label(&s)).unwrap_or_default()
+                        );
+                        return 1;
+                    }
+                }
+            } else {
+                setup::current(&st).map(|s| (setup::level(&st), s))
+            };
+            if let Some((n, s)) = pick {
+                let was = setup::current(&st).map(|c| c.engine);
+                engine = setup::apply(&s);
+                switching_engine = next && was != Some(s.engine);
+                rung = Some((n, ladder.len()));
+                println!(
+                    "setup: {} (step {} of {}) - {}",
+                    setup::label(&s),
+                    n + 1,
+                    ladder.len(),
+                    setup::reason(&st)
+                );
+            }
+        }
     }
     if report {
         return match report::write_bundle(&exe) {
@@ -352,10 +415,15 @@ Attach that zip to the GitHub issue.",
                 for p in &st.problems {
                     println!("  ! {}", text::tidy(p));
                 }
-                // No engine asked for: the plan follows what is in the folder.
+                // No engine asked for and no pick: the plan follows what is in
+                // the folder.
                 let engine = match engine {
-                    installer::Engine::ReShade if st.opti => installer::Engine::Opti,
-                    installer::Engine::ReShade if st.aio => installer::Engine::Aio,
+                    installer::Engine::ReShade if rung.is_none() && st.opti => {
+                        installer::Engine::Opti
+                    }
+                    installer::Engine::ReShade if rung.is_none() && st.aio => {
+                        installer::Engine::Aio
+                    }
                     e => e,
                 };
                 let names: Vec<&str> = installer::plan_with(&st, engine, with_renodx, upstream)
@@ -475,6 +543,16 @@ Attach that zip to the GitHub issue.",
             Error => println!("\n      FAILED: {detail}"),
         }
     };
+    if switching_engine {
+        // ReShade and OptiScaler both load as dxgi.dll: the old one goes first.
+        match installer::uninstall_all(&exe) {
+            Ok((list, _)) => println!("removed the previous setup: {}", list.join(", ")),
+            Err(e) => {
+                eprintln!("error: could not remove the previous setup: {e:#}");
+                return 1;
+            }
+        }
+    }
     let s = settings::Settings::load();
     match installer::run_all_with(
         &exe,
@@ -489,6 +567,9 @@ Attach that zip to the GitHub issue.",
         &step,
     ) {
         Ok(_) => {
+            if let (Some((n, _)), Some(dir)) = (rung, exe.parent()) {
+                let _ = setup::save_level(dir, n);
+            }
             if engine == installer::Engine::Opti {
                 println!(
                     "
@@ -499,6 +580,11 @@ Done. In game: Insert opens the OptiScaler overlay -> enable Neural Rendering (o
                     "
 Done. In game: turn the game's own upscaling, anti-aliasing and frame generation off, run windowed; Home opens ReShade -> Add-ons tab -> Standalone DLSS-NR + SR."
                 );
+            } else if installer::consumer() == installer::Consumer::ShortFuse
+                && game::inspect(&exe).is_ok_and(|s| s.sf)
+            {
+                println!("
+Done. In game: Home opens ReShade -> Add-ons tab -> RenoDX DLSS -> turn Neural Rendering on. (Home tab saying no effect files is normal on games with their own DLSS.)");
             } else {
                 println!("
 Done. In game: Home opens ReShade -> Add-ons tab -> DLSS 5 Neural Rendering -> enable. (Home tab saying no effect files is normal on games with their own DLSS.)");

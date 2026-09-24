@@ -12,6 +12,7 @@ use crate::quality_preset::QualityChoice;
 use crate::renodx;
 use crate::reshade_ini;
 use crate::settings::Settings;
+use crate::setup;
 use crate::text;
 use crate::theme::{self as t};
 use crate::update;
@@ -99,7 +100,13 @@ pub struct App {
     /// host measured to work on NVIDIA 616.64 where the current one faults (#69).
     renodx_classic: bool,
     /// Ask for the newest DLSS 5 add-on build instead of the default 4.70.
-    renodx_newest: bool,
+    /// Pin the DLSS 5 add-on at 4.70 (the steady build, with Enable Upscaling).
+    renodx_steady: bool,
+    /// Which neural consumer on the ReShade route when Advanced is open.
+    consumer: installer::Consumer,
+    /// The Advanced section is open: what it shows is what gets installed.
+    /// Closed, the setup picker decides.
+    advanced: bool,
     /// OptiScaler route, RTX 40 only: the fork's built-in MFG unlock (#83).
     ada_mfg: bool,
     /// OptiScaler route, D3D12, any RTX: FSR 3.1 frame generation (2X).
@@ -254,7 +261,9 @@ impl App {
             opti_presr: false,
             ampere_mfg: false,
             renodx_classic: false,
-            renodx_newest: false,
+            renodx_steady: false,
+            consumer: installer::Consumer::ShortFuse,
+            advanced: false,
             ada_mfg: false,
             opti_fg: false,
             renodx: RenodxLookup::Idle,
@@ -367,10 +376,46 @@ impl App {
                     std::fs::read_to_string(s.consumer_dir().join(game::DLSS5_ADDON_MARKER)).ok()
                 })
                 .map(|t| t.trim().to_owned());
-            self.renodx_classic = tag.as_deref() == Some(installer::RENODX_CLASSIC_TAG);
-            self.renodx_newest = tag.as_deref().is_some_and(|t| {
-                t != installer::RENODX_CLASSIC_TAG && t != installer::RENODX_DEFAULT_TAG
-            });
+            let _ = tag;
+            // The Advanced controls start where the picker would put this
+            // game, so opening Advanced shows what Install is about to do.
+            let pick = self
+                .status
+                .as_ref()
+                .and_then(|r| r.as_ref().ok())
+                .and_then(setup::current);
+            let hand = self
+                .status
+                .as_ref()
+                .and_then(|r| r.as_ref().ok())
+                .map(|s| (setup::hand_chosen(s), s.upstream, s.aio));
+            if let Some((true, up, aio)) = hand {
+                // Picked by hand before the picker existed: show it as it is.
+                self.advanced = true;
+                self.upstream_on = up;
+                if aio {
+                    self.engine = Engine::Aio;
+                }
+            } else if let Some(p) = pick {
+                self.advanced = false;
+                self.engine = p.engine;
+                self.consumer = p.consumer;
+                self.upstream_on = false;
+                self.renodx_classic = p.addon_tag == Some(installer::RENODX_CLASSIC_TAG);
+                self.renodx_steady = p.addon_tag == Some(installer::RENODX_STEADY_TAG);
+            }
+            // RTX 20/30 run the model at 75% by default: the pass at full size
+            // costs them the most frame time and input latency (#112).
+            let tier = self
+                .status
+                .as_ref()
+                .and_then(|r| r.as_ref().ok())
+                .and_then(|s| s.gpu.as_ref().map(|(_, t)| *t));
+            self.working_scale = if tier == Some(crate::gpu::Tier::Rtx2030) {
+                0.75
+            } else {
+                1.0
+            };
             self.start_renodx_lookup();
         }
         self.reload_knobs_and_perf();
@@ -460,10 +505,33 @@ impl App {
     }
 
     fn start(&mut self, remove: Option<bool>) {
+        self.start_with(remove, None);
+    }
+
+    /// "Try the next setup": one rung down this game's ladder. A change of
+    /// engine takes the old one out first, since both load as dxgi.dll.
+    fn try_next_setup(&mut self) {
+        let Some(st) = self.status.as_ref().and_then(|r| r.as_ref().ok()) else {
+            return;
+        };
+        let Some((n, next)) = setup::next(st) else {
+            return;
+        };
+        let switch = setup::current(st).map(|c| c.engine) != Some(next.engine);
+        self.advanced = false;
+        self.start_with(None, Some((n, next, switch)));
+    }
+
+    fn start_with(&mut self, remove: Option<bool>, forced: Option<(usize, setup::Setup, bool)>) {
         let Some(exe) = self.exe() else { return };
-        let engine = self.engine;
+        let mut engine = self.engine;
         let with_renodx = self.renodx_on;
-        let upstream = self.upstream_on;
+        let mut upstream = self.upstream_on;
+        // Advanced closed: the picker's setup, and its rung saved on success.
+        // Open: what the controls say, saved as a rung when it is one.
+        let st = self.status.as_ref().and_then(|r| r.as_ref().ok()).cloned();
+        let mut rung: Option<usize> = None;
+        let mut switch_engine = false;
         std::env::set_var(
             installer::WORKING_SCALE_ENV,
             format!("{:.2}", self.working_scale),
@@ -478,12 +546,39 @@ impl App {
         } else {
             std::env::remove_var(installer::AMPERE_MFG_ENV);
         }
-        if self.renodx_classic {
-            std::env::set_var(installer::RENODX_TAG_ENV, installer::RENODX_CLASSIC_TAG);
-        } else if self.renodx_newest {
-            std::env::set_var(installer::RENODX_TAG_ENV, installer::RENODX_LATEST);
+        let manual_tag = if self.renodx_classic {
+            Some(installer::RENODX_CLASSIC_TAG)
+        } else if self.renodx_steady {
+            Some(installer::RENODX_STEADY_TAG)
         } else {
-            std::env::remove_var(installer::RENODX_TAG_ENV);
+            None
+        };
+        match (&forced, &st) {
+            (Some((n, s, sw)), _) => {
+                engine = setup::apply(s);
+                upstream = false;
+                rung = Some(*n);
+                switch_engine = *sw;
+            }
+            (None, Some(g)) if remove.is_none() && !self.advanced => {
+                if let Some(s) = setup::current(g) {
+                    engine = setup::apply(&s);
+                    upstream = false;
+                    rung = Some(setup::level(g));
+                }
+            }
+            _ => {
+                let manual = setup::Setup {
+                    engine,
+                    consumer: self.consumer,
+                    addon_tag: manual_tag,
+                };
+                setup::apply(&manual);
+                rung = st
+                    .as_ref()
+                    .filter(|_| !upstream)
+                    .and_then(|g| setup::ladder(g).iter().position(|x| *x == manual));
+            }
         }
         if self.ada_mfg {
             std::env::set_var(installer::ADA_MFG_ENV, "1");
@@ -503,6 +598,12 @@ impl App {
                 "0".to_owned()
             },
         );
+        let sf_route = engine == Engine::ReShade
+            && !upstream
+            && installer::consumer() == installer::Consumer::ShortFuse
+            && st
+                .as_ref()
+                .is_some_and(|g| g.mode == game::Mode::Native && !g.is32());
         let (tx, rx): (Sender<Msg>, Receiver<Msg>) = channel();
         self.rx = Some(rx);
         self.running = true;
@@ -537,7 +638,16 @@ impl App {
             } else {
                 let p_tx = tx.clone();
                 let s_tx = tx.clone();
-                installer::run_all(
+                if switch_engine {
+                    if let Err(e) = installer::uninstall_all(&exe) {
+                        let _ = tx.send(Msg::Finished(Err(format!(
+                            "Could not take the previous setup out: {e:#}"
+                        ))));
+                        return;
+                    }
+                }
+                let saved_exe = exe.clone();
+                let result = installer::run_all(
                     &exe,
                     engine,
                     with_renodx,
@@ -557,13 +667,21 @@ impl App {
                 .map(|_| {
                     if engine == Engine::Opti {
                         "Done. In game: Insert opens the OptiScaler overlay → enable Neural Rendering.".to_owned()
+                    } else if sf_route {
+                        "Done. In game: Home opens ReShade → Add-ons tab → RenoDX DLSS → turn Neural Rendering on.".to_owned()
                     } else if engine == Engine::Aio {
                         "Done. In game: turn the game's own upscaling, anti-aliasing and frame generation off, run windowed; Home opens ReShade → Add-ons tab → Standalone DLSS-NR + SR.".to_owned()
                     } else {
                         "Done. In game: Home opens ReShade → Add-ons tab → DLSS 5 Neural Rendering → enable. (Home tab saying \"no effect files\" is normal on games with their own DLSS.)".to_owned()
                     }
                 })
-                .map_err(|e| format!("{e:#}"))
+                .map_err(|e| format!("{e:#}"));
+                if result.is_ok() {
+                    if let (Some(n), Some(d)) = (rung, saved_exe.parent()) {
+                        let _ = setup::save_level(d, n);
+                    }
+                }
+                result
             };
             let _ = tx.send(Msg::Finished(out));
         });
@@ -999,6 +1117,13 @@ const TILE_UPSTREAM: Tile = Tile {
     optional: false,
 };
 
+const TILE_SF: Tile = Tile {
+    title: "ShortFuse's DLSS add-on",
+    detail: "renodx-dlss.addon64 (ShortFuse) \u{00b7} nvngx_dlssnr.dll",
+    ok: |s| s.sf && s.dlssnr,
+    optional: false,
+};
+
 const TILE_HOST: Tile = Tile {
     title: "host64 helper (32-bit game)",
     detail: "dlss5-feed-host64.exe + 64-bit ReShade · add-on and models live in host64\\",
@@ -1049,8 +1174,9 @@ fn tiles_for(
     engine: Engine,
     renodx_on: bool,
     upstream_on: bool,
+    sf_on: bool,
 ) -> Vec<&'static Tile> {
-    let mut v = base_tiles(st, engine, upstream_on);
+    let mut v = base_tiles(st, engine, upstream_on, sf_on);
     if st.is_some_and(|s| s.re_engine) {
         v.insert(0, &TILE_REFRAMEWORK);
     }
@@ -1063,7 +1189,12 @@ fn tiles_for(
     v
 }
 
-fn base_tiles(st: Option<&GameStatus>, engine: Engine, upstream_on: bool) -> Vec<&'static Tile> {
+fn base_tiles(
+    st: Option<&GameStatus>,
+    engine: Engine,
+    upstream_on: bool,
+    sf_on: bool,
+) -> Vec<&'static Tile> {
     if engine == Engine::Aio || st.is_some_and(|s| s.aio && !s.opti) {
         return vec![&TILES_NATIVE[1], &TILE_AIO, &TILE_AIO_RUNTIME];
     }
@@ -1072,14 +1203,17 @@ fn base_tiles(st: Option<&GameStatus>, engine: Engine, upstream_on: bool) -> Vec
             vec![&TILES_NATIVE[0], &TILE_OPTI, &TILE_OPTI_MODEL]
         }
         Some(game::Mode::Native) => {
-            let needs_bridge = st.is_some_and(|s| s.needs_bridge());
             let upstream = upstream_on || st.is_some_and(|s| s.upstream);
+            let sf = !upstream && (sf_on || st.is_some_and(|s| s.sf && !s.dlss5_addon));
+            let needs_bridge = st.is_some_and(|s| s.needs_bridge()) && !sf;
             TILES_NATIVE
                 .iter()
                 .filter(|t| t.title != "DX11 bridge" || needs_bridge)
                 .map(|t| {
                     if upstream && t.title == "DLSS 5 add-on \u{00b7} leaked" {
                         &TILE_UPSTREAM
+                    } else if sf && t.title == "DLSS 5 add-on \u{00b7} leaked" {
+                        &TILE_SF
                     } else {
                         t
                     }
@@ -2955,14 +3089,107 @@ impl eframe::App for App {
                         self.inspect_resolved();
                     }
                 }
-                // Driver 616.64 faults inside NGX with the current add-on build;
-                // the classic one is the way through until that is fixed (#69).
-                if self.engine == Engine::ReShade {
+                // ── the setup this game gets ─────────────────────
+                // One line saying what Install will do and why; everything that
+                // could change it lives under Advanced, closed by default.
+                if let Some(g) = &ok_status {
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        ui.label(
+                            RichText::new("SETUP")
+                                .font(t::plex_semibold(11.0))
+                                .color(t::TEXT_MUTED),
+                        );
+                        match setup::current(g) {
+                            Some(p) if !self.advanced => {
+                                ui.label(
+                                    RichText::new(setup::label(&p))
+                                        .font(t::plex_medium(13.0))
+                                        .color(t::TEXT),
+                                );
+                                let n = setup::ladder(g).len();
+                                if n > 1 {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "option {} of {n}",
+                                            setup::level(g) + 1
+                                        ))
+                                        .font(t::plex(11.0))
+                                        .color(t::TEXT_DIM),
+                                    );
+                                }
+                            }
+                            Some(_) => {
+                                ui.label(
+                                    RichText::new("chosen by hand below (Advanced)")
+                                        .font(t::plex_medium(13.0))
+                                        .color(t::TEXT_SOFT),
+                                );
+                            }
+                            None => {
+                                ui.label(
+                                    RichText::new("none of this tool's setups fits this game")
+                                        .font(t::plex_medium(13.0))
+                                        .color(t::WARN),
+                                );
+                            }
+                        }
+                    });
+                    ui.label(
+                        RichText::new(setup::reason(g))
+                            .font(t::plex(11.0))
+                            .color(t::TEXT_DIM),
+                    );
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        // Offered once something is installed: the answer to
+                        // "it did not work" is the next rung, not a menu.
+                        if g.complete() && !self.advanced {
+                            if let Some((_, nx)) = setup::next(g) {
+                                let b = egui::Button::new(
+                                    RichText::new(format!(
+                                        "Not working? Try the next setup: {}",
+                                        setup::label(&nx)
+                                    ))
+                                    .font(t::plex_medium(12.0))
+                                    .color(t::TEXT_SOFT),
+                                )
+                                .stroke(Stroke::new(1.0, t::BORDER_STRONG))
+                                .corner_radius(CornerRadius::same(8));
+                                if ui.add_enabled(!self.running, b).clicked() {
+                                    self.try_next_setup();
+                                }
+                            }
+                        }
+                        let adv = egui::Button::new(
+                            RichText::new(if self.advanced {
+                                "Advanced \u{25be}  (back to the automatic setup)"
+                            } else {
+                                "Advanced \u{25b8}"
+                            })
+                            .font(t::plex(12.0))
+                            .color(t::TEXT_MUTED),
+                        )
+                        .frame(false);
+                        if ui.add_enabled(!self.running, adv).clicked() {
+                            self.advanced = !self.advanced;
+                            if !self.advanced {
+                                // Closing Advanced returns to the picker's setup.
+                                self.inspect_resolved();
+                            }
+                        }
+                    });
+                }
+                if self.advanced && self.engine == Engine::ReShade {
+                    // Driver 616.64 faults inside NGX with newer add-on builds;
+                    // the classic one is the way through there (#69).
                     let mut on = self.renodx_classic;
                     let cb = egui::Checkbox::new(
                         &mut on,
                         RichText::new(
-                            "Black screen, crash, driver reset, or worse image than before? Install the classic add-on build (4.55)",
+                            "DLSS 5 add-on: install the classic build (4.55) \u{2014} for a black screen, crash or driver reset",
                         )
                         .font(t::plex(11.5))
                         .color(t::TEXT_SOFT),
@@ -2970,13 +3197,11 @@ impl eframe::App for App {
                     if ui.add_enabled(!self.running, cb).changed() {
                         self.renodx_classic = on;
                     }
-                    // The default is 4.70; the newest rhi-repo build is the
-                    // opt-in since 5.2.1 broke four games in three days.
-                    let mut newest = self.renodx_newest;
+                    let mut steady = self.renodx_steady;
                     let cb = egui::Checkbox::new(
-                        &mut newest,
+                        &mut steady,
                         RichText::new(
-                            "Try the newest add-on build (5.2.1 or later) instead of the default 4.70 \u{2014} multi-pass sliders, new colour codec, but no Enable Upscaling option (4.x only); crashes or blown-out colours reported in some games",
+                            "DLSS 5 add-on: install 4.70 instead of the newest stable build \u{2014} the last one with Enable Upscaling; the newer builds broke some games",
                         )
                         .font(t::plex(11.5))
                         .color(t::TEXT_SOFT),
@@ -2985,14 +3210,15 @@ impl eframe::App for App {
                         .add_enabled(!self.running && !self.renodx_classic, cb)
                         .changed()
                     {
-                        self.renodx_newest = newest;
+                        self.renodx_steady = steady;
                     }
                 }
                 // RTX 40 multi-frame generation on the ReShade route: a single
                 // MIT add-on, in-memory only. OptiScaler's own built-in unlock
                 // reported "DLSSG not patched: capability not matched" on the
                 // reporter's machine while this one reached 6X (#83).
-                if self.engine == Engine::ReShade
+                if self.advanced
+                    && self.engine == Engine::ReShade
                     && ok_status.as_ref().is_some_and(|s| !s.is32())
                     && ok_status
                         .as_ref()
@@ -3003,7 +3229,7 @@ impl eframe::App for App {
                     let cb = egui::Checkbox::new(
                         &mut on,
                         RichText::new(
-                            "Unlock RTX 40 multi-frame generation (3X and above, up to 6X) — the game must have frame generation of its own",
+                            "Unlock RTX 40 multi-frame generation (3X and above, up to 6X) \u{2014} the game must have frame generation of its own",
                         )
                         .font(t::plex(11.5))
                         .color(t::TEXT_SOFT),
@@ -3024,6 +3250,7 @@ impl eframe::App for App {
                     }
                 }
 
+                if self.advanced {
                 // ── engine chooser ───────────────────────────────
                 let native = ok_status.as_ref().is_some_and(|s| s.mode == game::Mode::Native);
                 if !native && self.engine == Engine::Opti {
@@ -3342,9 +3569,9 @@ impl eframe::App for App {
                         );
                         ui.label(
                             RichText::new(if native {
-                                "\u{2014} both run DLSS 5; they differ in where the network runs"
+                                "\u{2014} all of them run DLSS 5; ShortFuse's is the default for a game with its own DLSS"
                             } else {
-                                "\u{2014} only the stable add-on works in a game with no DLSS of its own"
+                                "\u{2014} only the DLSS 5 add-on works in a game with no DLSS of its own"
                             })
                             .font(t::plex(11.0))
                             .color(t::TEXT_DIM),
@@ -3353,7 +3580,39 @@ impl eframe::App for App {
                     let gap = 8.0;
                     let row_w = ui.available_width();
                     let col_w = ((row_w - gap) / 2.0).floor();
-                    let stable_title = "Stable \u{2014} RenoDX DLSS 5 add-on";
+                    // ShortFuse's add-on first: the RenoDX author's own consumer,
+                    // 64-bit games with DLSS of their own.
+                    let sf_ok = native && ok_status.as_ref().is_some_and(|s| !s.is32());
+                    if !sf_ok && self.consumer == installer::Consumer::ShortFuse {
+                        self.consumer = installer::Consumer::Dlss5;
+                    }
+                    let sf_title = "Default \u{2014} ShortFuse's DLSS add-on";
+                    let sf_lines = [
+                        "From the author of RenoDX. Hooks the game's own DLSS in DX11 and DX12, so no bridge.",
+                        "In game: Home \u{2192} Add-ons \u{2192} RenoDX DLSS.",
+                    ];
+                    let sf_note = if sf_ok {
+                        ""
+                    } else {
+                        "Needs a 64-bit game with its own DLSS."
+                    };
+                    let sf_h = engine_card_height(ui, col_w, sf_title, &sf_lines, sf_note);
+                    let (sf_row, _) =
+                        ui.allocate_exact_size(Vec2::new(row_w, sf_h), egui::Sense::hover());
+                    if engine_card(
+                        ui,
+                        egui::Rect::from_min_size(sf_row.min, Vec2::new(col_w, sf_h)),
+                        !self.upstream_on && self.consumer == installer::Consumer::ShortFuse,
+                        sf_ok,
+                        sf_title,
+                        &sf_lines,
+                        sf_note,
+                    ) {
+                        self.upstream_on = false;
+                        self.consumer = installer::Consumer::ShortFuse;
+                    }
+                    ui.add_space(gap);
+                    let stable_title = "RenoDX DLSS 5 add-on";
                     let stable_lines = [
                         "The proven route. The network runs after the upscaler, at output resolution.",
                         "In game: Home \u{2192} Add-ons \u{2192} DLSS 5 Neural Rendering.",
@@ -3361,7 +3620,7 @@ impl eframe::App for App {
                     let up_title = "Experimental \u{2014} Neural Upstream";
                     let up_lines = [
                         "Runs the network before the upscaler, at render resolution, so it costs less.",
-                        "Replaces the add-on on the left. Read the warning below first.",
+                        "Replaces the other add-ons. Read the warning below first.",
                     ];
                     let up_note = if native {
                         ""
@@ -3380,13 +3639,14 @@ impl eframe::App for App {
                     if engine_card(
                         ui,
                         left,
-                        !self.upstream_on,
+                        !self.upstream_on && self.consumer == installer::Consumer::Dlss5,
                         true,
                         stable_title,
                         &stable_lines,
                         "",
                     ) {
                         self.upstream_on = false;
+                        self.consumer = installer::Consumer::Dlss5;
                     }
                     if engine_card(
                         ui,
@@ -3467,6 +3727,7 @@ impl eframe::App for App {
                             });
                     }
                 }
+                }
                 // The engine card's own border ended flush against this
                 // heading, which read as the two touching (#77).
                 ui.add_space(12.0);
@@ -3481,7 +3742,23 @@ impl eframe::App for App {
                 let tile_h = 44.0;
                 let row_w = ui.available_width();
                 let col_w = ((row_w - gap) / 2.0).floor();
-                let tiles = tiles_for(ok_status.as_ref(), self.engine, self.renodx_on, self.upstream_on);
+                // Which consumer the tile list shows: the picked one when
+                // Advanced is closed, the chosen card when it is open.
+                let sf_on = if self.advanced {
+                    self.consumer == installer::Consumer::ShortFuse
+                } else {
+                    ok_status
+                        .as_ref()
+                        .and_then(setup::current)
+                        .is_some_and(|p| p.engine == Engine::ReShade && p.consumer == installer::Consumer::ShortFuse)
+                };
+                let tiles = tiles_for(
+                    ok_status.as_ref(),
+                    self.engine,
+                    self.renodx_on,
+                    self.upstream_on && self.advanced,
+                    sf_on,
+                );
                 for row in tiles.chunks(2) {
                     let (row_rect, _) =
                         ui.allocate_exact_size(Vec2::new(row_w, tile_h), egui::Sense::hover());
@@ -3882,7 +4159,7 @@ mod tests {
         st.opti = true;
         st.dlssnr = true;
         assert!(st.complete());
-        let tiles = tiles_for(Some(&st), Engine::Opti, false, false);
+        let tiles = tiles_for(Some(&st), Engine::Opti, false, false, false);
         let missing: Vec<&str> = tiles
             .iter()
             .filter(|t| !(t.ok)(&st) && !t.optional)
@@ -3898,7 +4175,7 @@ mod tests {
         let mut st = stub_status(Mode::Native, Api::Dx11);
         st.reshade = true;
         st.dlssnr = true;
-        let tiles = tiles_for(Some(&st), Engine::ReShade, false, false);
+        let tiles = tiles_for(Some(&st), Engine::ReShade, false, false, false);
         assert!(tiles
             .iter()
             .any(|t| t.title == "DLSS 5 add-on \u{00b7} leaked" && !(t.ok)(&st)));

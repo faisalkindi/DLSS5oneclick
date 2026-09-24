@@ -329,6 +329,9 @@ pub struct Latest {
     pub dlss: Option<String>,
     pub dlssnr: Option<String>,
     pub aio: Option<String>,
+    /// Newest stable ShortFuse add-on and RenoDX DLSS 5 add-on builds.
+    pub sf: Option<String>,
+    pub dlss5: Option<String>,
 }
 
 impl Latest {
@@ -345,6 +348,8 @@ impl Latest {
                 .or_else(|| rhi_latest(client, "dlss-").ok().map(|(t, _)| t)),
             dlssnr: rhi_latest(client, "dlssnr-").ok().map(|(t, _)| t),
             aio: net::latest_tag(client, AIO_REPO).ok(),
+            sf: rhi_newest(client, SF_PREFIX).ok().map(|(t, _)| t),
+            dlss5: rhi_newest(client, DLSS5_PREFIX).ok().map(|(t, _)| t),
         }
     }
 }
@@ -411,13 +416,13 @@ pub fn missing_install_files(st: &GameStatus) -> Vec<String> {
                 if !st.reshade {
                     missing.push(format!("{} (ReShade)", game::RESHADE_PROXY));
                 }
-                if !(st.dlss5_addon || st.upstream) {
+                if !(st.dlss5_addon || st.upstream || st.sf) {
                     missing.push("DLSS 5 neural consumer add-on".into());
                 }
                 if !st.dlssnr {
                     missing.push(game::DLSSNR_DLL.into());
                 }
-                if st.needs_bridge() && !st.bridge {
+                if st.needs_bridge() && !st.bridge && !st.sf {
                     missing.push("dx11 bridge add-on".into());
                 }
             }
@@ -449,6 +454,19 @@ pub fn stale_components(dir: &Path, latest: &Latest) -> Vec<String> {
     );
     if let Ok(m) = fs::read_to_string(dir.join(game::AIO_MANIFEST)) {
         check("DLSS5 ReShade AIO", manifest_tag(&m), &latest.aio);
+    }
+    if dir.join(game::SF_ADDON).is_file() {
+        check(
+            "ShortFuse DLSS add-on",
+            mine(game::SF_ADDON_MARKER),
+            &latest.sf,
+        );
+    }
+    if let Some(have) = mine(game::DLSS5_ADDON_MARKER) {
+        let h = have.trim();
+        if h != RENODX_STEADY_TAG && h != RENODX_CLASSIC_TAG {
+            check("DLSS 5 add-on", Some(have), &latest.dlss5);
+        }
     }
     if let Ok(m) = fs::read_to_string(dir.join(game::OPTI_MANIFEST)) {
         // Compare against the repo this install came from. Comparing a pre-SR
@@ -1013,8 +1031,20 @@ const STEP_FEEDER_CLEANUP: Step = Step {
     run: step_feeder_cleanup,
 };
 const STEP_DLSS5_CLEANUP: Step = Step {
-    name: "Remove the RenoDX DLSS 5 add-on (Neural Upstream replaces it)",
+    name: "Remove the RenoDX DLSS 5 add-on (another neural add-on replaces it)",
     run: step_dlss5_cleanup,
+};
+const STEP_SF: Step = Step {
+    name: "ShortFuse DLSS add-on",
+    run: step_sf,
+};
+const STEP_SF_CLEANUP: Step = Step {
+    name: "Remove the ShortFuse DLSS add-on (another neural add-on replaces it)",
+    run: step_sf_cleanup,
+};
+const STEP_REPLACED_CLEANUP: Step = Step {
+    name: "Remove add-ons ShortFuse's replaces (Neural Upstream, DX11 bridge)",
+    run: step_replaced_cleanup,
 };
 const STEP_REFRAMEWORK: Step = Step {
     name: "REFramework (RE Engine needs it before ReShade)",
@@ -1360,7 +1390,35 @@ fn plan_reshade(st: &GameStatus, upstream: bool) -> Vec<Step> {
     v
 }
 
+/// Which neural consumer goes into a game with DLSS of its own on the ReShade
+/// engine. `sf` is ShortFuse's add-on, `dlss5` the RenoDX DLSS 5 add-on.
+/// Unset means the DLSS 5 add-on here; the setup picker (`setup.rs`) is what
+/// makes ShortFuse the default for the GUI and the command line.
+pub const CONSUMER_ENV: &str = "DLSS5ONECLICK_CONSUMER";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Consumer {
+    ShortFuse,
+    Dlss5,
+}
+
+pub fn consumer() -> Consumer {
+    match std::env::var(CONSUMER_ENV).ok().as_deref().map(str::trim) {
+        Some(v) if v.eq_ignore_ascii_case("sf") || v.eq_ignore_ascii_case("shortfuse") => {
+            Consumer::ShortFuse
+        }
+        _ => Consumer::Dlss5,
+    }
+}
+
 fn plan_reshade_consumer(st: &GameStatus, upstream: bool) -> Vec<Step> {
+    plan_reshade_consumer_with(st, upstream, consumer())
+}
+
+fn plan_reshade_consumer_with(st: &GameStatus, upstream: bool, c: Consumer) -> Vec<Step> {
+    // ShortFuse's add-on is 64-bit and serves a game's own DLSS; a game with
+    // no DLSS keeps the Feeder and the DLSS 5 add-on it feeds.
+    let sf = c == Consumer::ShortFuse && !upstream && st.mode == game::Mode::Native && !st.is32();
     match st.mode {
         game::Mode::Feeder => {
             let mut v = vec![STEP_RESHADE];
@@ -1386,12 +1444,30 @@ fn plan_reshade_consumer(st: &GameStatus, upstream: bool) -> Vec<Step> {
             // the RenoDX add-on's place rather than sitting next to it.
             if upstream {
                 v.push(STEP_DLSS5_CLEANUP);
+                if st.sf {
+                    v.push(STEP_SF_CLEANUP);
+                }
                 v.push(STEP_UPSTREAM);
                 v.push(STEP_DLSSNR_ONLY);
+            } else if sf {
+                // The two RenoDX add-ons cannot run in one process, and
+                // ShortFuse's reaches D3D11's NGX calls itself, so the bridge
+                // that mirrors them for the DLSS 5 add-on goes too.
+                if st.dlss5_addon {
+                    v.push(STEP_DLSS5_CLEANUP);
+                }
+                if st.upstream || st.bridge {
+                    v.push(STEP_REPLACED_CLEANUP);
+                }
+                v.push(STEP_SF);
+                v.push(STEP_DLSSNR_ONLY);
             } else {
+                if st.sf {
+                    v.push(STEP_SF_CLEANUP);
+                }
                 v.push(STEP_DLSS5);
             }
-            if st.needs_bridge() {
+            if st.needs_bridge() && !sf {
                 v.push(STEP_BRIDGE);
             }
             v.push(STEP_CONFIG);
@@ -1410,6 +1486,16 @@ fn ver_key(tag: &str, prefix: &str) -> Vec<u64> {
         .collect()
 }
 
+/// A release candidate or beta by its tag. rhi-repo marks none of its
+/// releases as pre-releases, so "7.0.0-rc8" is only a candidate by name, and
+/// eight of them landed in one day. The newest *stable* build is the default.
+pub fn prerelease_tag_name(tag: &str) -> bool {
+    let t = tag.to_ascii_lowercase();
+    ["-rc", "beta", "alpha", "-pre"]
+        .iter()
+        .any(|m| t.contains(m))
+}
+
 /// Newest rhi-repo release whose tag is `prefix` + digits; returns (tag, first asset URL).
 pub fn pick_latest_asset(releases: &[Value], prefix: &str) -> Result<(String, String)> {
     let cands: Vec<(Vec<u64>, String, String)> = releases
@@ -1419,6 +1505,9 @@ pub fn pick_latest_asset(releases: &[Value], prefix: &str) -> Result<(String, St
             let rest = tag.strip_prefix(prefix)?;
             if !rest.chars().next()?.is_ascii_digit() {
                 return None; // "dlss-" must not match "dlssg-"
+            }
+            if prerelease_tag_name(tag) {
+                return None;
             }
             let url = r
                 .get("assets")?
@@ -1455,25 +1544,57 @@ fn best_tag(mut cands: Vec<(Vec<u64>, String, String)>) -> (String, String) {
 /// `latest` means whatever rhi-repo lists newest; anything else is a tag.
 pub const RENODX_TAG_ENV: &str = "DLSS5ONECLICK_RENODX_TAG";
 
-/// The build installed when nothing else is asked for. 5.2.1 went live on
-/// rhi-repo on September 11 and within three days four games came back
-/// broken on it — Dragon's Dogma 2 crashing at the first evaluate (4.55 ran,
-/// an A/B on the same folder, #96), RDR2 with blown-out colour (#86), Elden
-/// Ring under Proton white (#76), Lunar Eclipse flashing (#100) — where the
-/// build before it, 4.70, was the one every reporter had working. So 4.70 is
-/// the default and the newest build is the opt-in.
-pub const RENODX_DEFAULT_TAG: &str = "renodx-dlss5-4.70";
-/// The env value that asks for the newest build instead of the default.
+/// The steady build, one rung down the fallback ladder. 5.2.1 went live on
+/// rhi-repo on September 11 and within three days four games came back broken
+/// on it — Dragon's Dogma 2 crashing at the first evaluate (#96), RDR2 with
+/// blown-out colour (#86), Elden Ring under Proton white (#76), Lunar Eclipse
+/// flashing (#100) — where 4.70 was what every reporter had working. It is
+/// also the last build with Enable Upscaling (#109). From 0.13.28 the default
+/// is the newest stable build and this one is the fallback.
+pub const RENODX_STEADY_TAG: &str = "renodx-dlss5-4.70";
+/// The env value that asks for the newest build (the default when unset).
 pub const RENODX_LATEST: &str = "latest";
 
 /// What `DLSS5ONECLICK_RENODX_TAG` resolves to: `Some(tag)` to pin, `None`
-/// for the newest build.
+/// for the newest stable build.
 pub fn renodx_tag_choice(env: Option<&str>) -> Option<String> {
     match env.map(str::trim) {
-        None | Some("") => Some(RENODX_DEFAULT_TAG.to_owned()),
+        None | Some("") => None,
         Some(v) if v.eq_ignore_ascii_case(RENODX_LATEST) => None,
         Some(v) => Some(v.to_owned()),
     }
+}
+
+pub const DLSS5_PREFIX: &str = "renodx-dlss5-";
+pub const SF_PREFIX: &str = "renodx-dlss-SF-";
+
+/// The newest stable rhi-repo build for `prefix`, ignoring any pin.
+pub fn rhi_newest(client: &Client, prefix: &str) -> Result<(String, String)> {
+    if let Ok(releases) = net::get_json_github(client, RHI_RELEASES) {
+        if let Some(arr) = releases.as_array() {
+            if let Ok(r) = pick_latest_asset(arr, prefix) {
+                return Ok(r);
+            }
+        }
+    }
+    let tags = net::github_release_tags_html(client, RHI_REPO, prefix, 6)?;
+    let mut cands: Vec<(Vec<u64>, String)> = tags
+        .into_iter()
+        .filter(|t| {
+            t[prefix.len()..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit())
+                && !prerelease_tag_name(t)
+        })
+        .map(|t| (ver_key(&t, prefix), t))
+        .collect();
+    cands.sort();
+    let (_, tag) = cands
+        .pop()
+        .with_context(|| format!("no stable {prefix} release on github.com/{RHI_REPO}/releases"))?;
+    let url = net::github_asset_url_html(client, RHI_REPO, &tag, r#"[^"]+\.zip"#)?;
+    Ok((tag, url))
 }
 
 /// The classic-engine add-on. The Feeder's own host measured v4.7 to fault
@@ -1514,6 +1635,7 @@ pub fn rhi_latest(client: &Client, prefix: &str) -> Result<(String, String)> {
                 .chars()
                 .next()
                 .is_some_and(|c| c.is_ascii_digit())
+                && !prerelease_tag_name(t)
         })
         .map(|t| (ver_key(&t, prefix), t, String::new()))
         .collect();
@@ -2528,6 +2650,92 @@ fn step_dlss5_cleanup(
     Ok(removed)
 }
 
+/// ShortFuse's add-on: one file from the newest stable `renodx-dlss-SF-*`
+/// release, refreshed when the recorded tag is behind. It sits where the DLSS 5
+/// add-on would, beside the game exe.
+fn step_sf(
+    client: &Client,
+    st: &GameStatus,
+    work: &Path,
+    progress: Progress,
+) -> Result<Vec<String>> {
+    progress(0, "Looking up ShortFuse DLSS add-on releases");
+    let (tag, url) = rhi_newest(client, SF_PREFIX)?;
+    let cdir = st.consumer_dir();
+    let dest = cdir.join(game::SF_ADDON);
+    if dest.is_file() {
+        match fs::read_to_string(cdir.join(game::SF_ADDON_MARKER)) {
+            Ok(mine) if mine.trim() == tag => {
+                return Ok(vec![format!("{} already current ({tag})", game::SF_ADDON)]);
+            }
+            Ok(_) => progress(0, &format!("{}: {tag} is out, refreshing", game::SF_ADDON)),
+            Err(_) => {
+                return Ok(vec![format!(
+                    "{} present (not placed by this tool)",
+                    game::SF_ADDON
+                )]);
+            }
+        }
+    }
+    let z = work.join(format!("{tag}.zip"));
+    net::download(client, &url, &z, game::SF_ADDON, progress)?;
+    install_single_from_zip(&z, game::SF_ADDON, &dest)?;
+    fs::write(cdir.join(game::SF_ADDON_MARKER), tag.as_bytes())?;
+    Ok(vec![format!("{} ({tag})", game::SF_ADDON)])
+}
+
+/// Take ShortFuse's add-on out when the DLSS 5 add-on or Neural Upstream is
+/// going in: two neural consumers in one ReShade both evaluate every frame.
+fn step_sf_cleanup(
+    _c: &Client,
+    st: &GameStatus,
+    _w: &Path,
+    progress: Progress,
+) -> Result<Vec<String>> {
+    let mut removed = Vec::new();
+    for f in [game::SF_ADDON, game::SF_ADDON_MARKER] {
+        let p = st.consumer_dir().join(f);
+        if p.is_file() {
+            fs::remove_file(&p)?;
+            removed.push(f.to_owned());
+        }
+    }
+    progress(
+        100,
+        if removed.is_empty() {
+            "no ShortFuse add-on to remove"
+        } else {
+            "ShortFuse add-on removed"
+        },
+    );
+    Ok(removed)
+}
+
+/// What ShortFuse's add-on makes redundant: Neural Upstream (another neural
+/// consumer) and the DX11 bridge (it mirrors D3D11 DLSS calls for the DLSS 5
+/// add-on; ShortFuse's add-on hooks D3D11 itself).
+fn step_replaced_cleanup(
+    _c: &Client,
+    st: &GameStatus,
+    _w: &Path,
+    progress: Progress,
+) -> Result<Vec<String>> {
+    let mut removed = Vec::new();
+    for f in [
+        game::UPSTREAM_ADDON,
+        game::BRIDGE_ADDON,
+        "dlss5-dx11-bridge.addon64",
+    ] {
+        let p = st.game_dir().join(f);
+        if p.is_file() {
+            fs::remove_file(&p)?;
+            removed.push(f.to_owned());
+        }
+    }
+    progress(100, "nothing left over for ShortFuse's add-on to replace");
+    Ok(removed)
+}
+
 // ── step 5b: DX11 bridge (native-DLSS games rendering with D3D11) ──
 
 fn step_bridge(
@@ -3118,6 +3326,11 @@ pub fn uninstall(exe: &Path) -> Result<Vec<String>> {
         d.join(game::FEEDER_ADDON),
         d.join(game::DLSS5_ADDON),
         d.join(game::DLSS5_ADDON_MARKER),
+        d.join(game::SF_ADDON),
+        d.join(game::SF_ADDON_MARKER),
+        // The setup rung goes too: after Remove the game starts again at the
+        // top of its ladder.
+        d.join(crate::setup::LEVEL_FILE),
         d.join(game::DLSSNR_DLL),
         d.join(game::BRIDGE_ADDON),
         d.join(game::UPSTREAM_ADDON),
@@ -4369,6 +4582,8 @@ RestoreComputeSignature=true
             opti_unlocked: None,
             dlss: Some("dlss-310.9.0".into()),
             dlssnr: Some("dlssnr-310.8.SF-v2".into()),
+            sf: None,
+            dlss5: None,
             aio: None,
         };
         assert!(stale_components(d, &latest).is_empty());
@@ -4412,6 +4627,8 @@ RestoreComputeSignature=true
             opti_unlocked: None,
             dlss: None,
             dlssnr: None,
+            sf: None,
+            dlss5: None,
             aio: None,
         };
 
@@ -4791,14 +5008,15 @@ RestoreComputeSignature=true
         assert_eq!(plain, "no release found");
     }
 
-    /// 4.70 unless asked otherwise: unset and empty pin the default, "latest"
-    /// lifts the pin, anything else is a tag of its own.
+    /// Newest stable unless asked otherwise: unset, empty and "latest" all
+    /// mean it; anything else is a tag of its own.
     #[test]
-    fn renodx_default_is_4_70_and_latest_is_the_opt_in() {
-        assert_eq!(renodx_tag_choice(None).as_deref(), Some(RENODX_DEFAULT_TAG));
+    fn renodx_default_is_the_newest_stable_and_a_tag_pins() {
+        assert_eq!(renodx_tag_choice(None), None);
+        assert_eq!(renodx_tag_choice(Some("")), None);
         assert_eq!(
-            renodx_tag_choice(Some("")).as_deref(),
-            Some(RENODX_DEFAULT_TAG)
+            renodx_tag_choice(Some(RENODX_STEADY_TAG)).as_deref(),
+            Some(RENODX_STEADY_TAG)
         );
         assert_eq!(renodx_tag_choice(Some("latest")), None);
         assert_eq!(renodx_tag_choice(Some(" Latest ")), None);
@@ -4860,5 +5078,60 @@ AmpereMfgUnlock=true
         assert!(out.contains("TargetProcessName=auto"));
         // Already auto: nothing to write.
         assert!(set_ini_key(&out, "ProcessFilter", "TargetProcessName", "auto").is_none());
+    }
+
+    /// ShortFuse's add-on replaces the DLSS 5 add-on in a 64-bit game with its
+    /// own DLSS, takes no bridge in DX11, and never reaches a Feeder game or a
+    /// 32-bit one; the DLSS 5 route takes ShortFuse's out again.
+    #[test]
+    fn shortfuse_replaces_the_dlss5_addon_only_where_it_serves() {
+        let names = |v: Vec<Step>| v.iter().map(|s| s.name).collect::<Vec<_>>();
+        let mut st = game::stub_status(game::Mode::Native, game::Api::Dx11);
+        st.dlss5_addon = true;
+        st.bridge = true;
+        let sf = names(plan_reshade_consumer_with(&st, false, Consumer::ShortFuse));
+        assert!(sf.contains(&STEP_SF.name) && sf.contains(&STEP_DLSS5_CLEANUP.name));
+        assert!(sf.contains(&STEP_REPLACED_CLEANUP.name));
+        assert!(!sf.contains(&STEP_DLSS5.name) && !sf.contains(&STEP_BRIDGE.name));
+        st.sf = true;
+        let d5 = names(plan_reshade_consumer_with(&st, false, Consumer::Dlss5));
+        assert!(d5.contains(&STEP_DLSS5.name) && d5.contains(&STEP_BRIDGE.name));
+        assert!(d5.contains(&STEP_SF_CLEANUP.name) && !d5.contains(&STEP_SF.name));
+        // Neural Upstream wins over the consumer choice.
+        let up = names(plan_reshade_consumer_with(&st, true, Consumer::ShortFuse));
+        assert!(up.contains(&STEP_UPSTREAM.name) && !up.contains(&STEP_SF.name));
+        // A game with no DLSS keeps the Feeder and the DLSS 5 add-on.
+        st.mode = game::Mode::Feeder;
+        let fe = names(plan_reshade_consumer_with(&st, false, Consumer::ShortFuse));
+        assert!(fe.contains(&STEP_FEEDER.name) && fe.contains(&STEP_DLSS5.name));
+        assert!(!fe.contains(&STEP_SF.name));
+        // 32-bit: no ShortFuse.
+        st.mode = game::Mode::Native;
+        st.bitness = 32;
+        let b32 = names(plan_reshade_consumer_with(&st, false, Consumer::ShortFuse));
+        assert!(!b32.contains(&STEP_SF.name) && b32.contains(&STEP_DLSS5.name));
+    }
+
+    /// Release candidates are not the newest stable build.
+    #[test]
+    fn release_candidates_are_skipped_for_the_newest_build() {
+        let rel = |t: &str| serde_json::json!({"tag_name": t, "assets": [{"browser_download_url": format!("https://x/{t}.zip")}]});
+        let arr = vec![
+            rel("renodx-dlss5-7.0.0-rc8"),
+            rel("renodx-dlss5-6.5.3"),
+            rel("renodx-dlss5-4.70"),
+            rel("renodx-dlss-SF-26.0922.0041"),
+            rel("renodx-dlss-SF-26.0919.2025"),
+        ];
+        assert_eq!(
+            pick_latest_asset(&arr, DLSS5_PREFIX).unwrap().0,
+            "renodx-dlss5-6.5.3"
+        );
+        assert_eq!(
+            pick_latest_asset(&arr, SF_PREFIX).unwrap().0,
+            "renodx-dlss-SF-26.0922.0041"
+        );
+        assert!(prerelease_tag_name("renodx-dlss5-7.0.0-rc1"));
+        assert!(!prerelease_tag_name("dlssnr-310.8.SF-v2"));
     }
 }

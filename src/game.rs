@@ -18,6 +18,13 @@ pub const HOST_DIR: &str = "host64";
 pub const HOST_EXE: &str = "dlss5-feed-host64.exe";
 pub const FEEDER_FX: &str = "DLSS5_Feed.fx";
 pub const DLSS5_ADDON: &str = "renodx-dlss5.addon64";
+/// ShortFuse's own DLSS add-on (`renodx-dlss-SF-*` on rhi-repo): the RenoDX
+/// author's neural consumer, which hooks the game's NGX calls in D3D11 and
+/// D3D12 itself. It takes the place of `renodx-dlss5.addon64`; the two cannot
+/// run together.
+pub const SF_ADDON: &str = "renodx-dlss.addon64";
+/// The ShortFuse add-on release tag this tool placed.
+pub const SF_ADDON_MARKER: &str = "renodx-dlss.addon64.dlss5oneclick";
 pub const DLSSNR_DLL: &str = "nvngx_dlssnr.dll";
 pub const DLSS_DLL: &str = "nvngx_dlss.dll";
 pub const LUMENITE_KERNEL_FX: &str = "lumenite_Kernel.fx";
@@ -901,6 +908,8 @@ pub struct GameStatus {
     pub feeder: bool,
     pub lumenite: bool,
     pub dlss5_addon: bool,
+    /// ShortFuse's add-on (`renodx-dlss.addon64`) is beside the game.
+    pub sf: bool,
     pub dlssnr: bool,
     pub dlss: bool,
     /// What the folder scan said, before any override.
@@ -956,6 +965,7 @@ pub(crate) fn stub_status(mode: Mode, api: Api) -> GameStatus {
         feeder: false,
         lumenite: false,
         dlss5_addon: false,
+        sf: false,
         dlssnr: false,
         dlss: false,
         mode_detected: mode,
@@ -1111,9 +1121,12 @@ impl GameStatus {
                     && (!self.is32() || (self.host_exe && self.host_reshade))
             }
             Mode::Native => {
-                // Either neural consumer counts: the RenoDX add-on, or the
-                // experimental Neural Upstream one that stands in its place.
+                // Any neural consumer counts: the RenoDX DLSS 5 add-on,
+                // ShortFuse's, or the experimental Neural Upstream one. Only
+                // the DLSS 5 add-on needs the bridge in a DX11 game; ShortFuse's
+                // hooks D3D11's NGX calls itself.
                 (self.opti && self.dlssnr)
+                    || (self.reshade && self.sf && self.dlssnr)
                     || (self.reshade
                         && (self.dlss5_addon || self.upstream)
                         && self.dlssnr
@@ -1287,6 +1300,7 @@ pub fn inspect(exe: &Path) -> Result<GameStatus> {
         lumenite: shaders.join(LUMENITE_KERNEL_FX).is_file()
             && textures.join(LUMENITE_BLUENOISE).is_file(),
         dlss5_addon: cdir.join(DLSS5_ADDON).is_file(),
+        sf: cdir.join(SF_ADDON).is_file(),
         dlssnr: cdir.join(DLSSNR_DLL).is_file(),
         dlss: cdir.join(DLSS_DLL).is_file(),
         mode_detected,

@@ -281,6 +281,12 @@ pub fn diagnose(st: &GameStatus) -> Vec<Finding> {
         out.extend(upstream_findings(&rs));
         return out;
     }
+    // ShortFuse's add-on logs as "RenoDX DLSS", not as the DLSS 5 add-on, so
+    // the DLSS 5 add-on's lines would all read as missing.
+    if st.sf && !st.dlss5_addon {
+        out.extend(sf_findings(&rs));
+        return out;
+    }
     let failed_line = rs
         .lines()
         .find(|l| l.contains("Failed to load add-on") && l.contains("renodx-dlss5"));
@@ -736,6 +742,77 @@ pub fn run(exe: &Path) -> Result<Vec<Finding>> {
 /// slots, so `<no slot>` there is normal), every DLSS evaluate as `eval feat=`,
 /// and the add-on's own network as `2b: SNIPPET CreateFeature(18, …)` followed
 /// by `2c: NR Evaluate(…) -> 0x00000001` once it ran.
+/// ShortFuse's add-on (`renodx-dlss.addon64`), read by its own log lines.
+fn sf_findings(rs: &str) -> Vec<Finding> {
+    let mut out = Vec::new();
+    if let Some(l) = rs
+        .lines()
+        .find(|l| l.contains("Failed to load add-on") && l.contains("renodx-dlss.addon64"))
+    {
+        let code = l
+            .rsplit("error code ")
+            .next()
+            .unwrap_or("")
+            .trim_end_matches('!');
+        out.push(bad(format!(
+            "ReShade refused to load renodx-dlss.addon64 (ShortFuse's add-on), error code {code}."
+        )));
+        return out;
+    }
+    if rs.contains("failed to register RenoDX DLSS") {
+        out.push(bad(
+            "ShortFuse's add-on loaded but could not register with ReShade.",
+        ));
+        return out;
+    }
+    if rs.contains("RenoDX DLSS attached") {
+        out.push(ok("ShortFuse's DLSS add-on attached."));
+    } else {
+        out.push(bad(
+            "ShortFuse's add-on never attached. renodx-dlss.addon64 is missing from the game              folder, disabled in ReShade's Add-ons tab, or quarantined by antivirus.",
+        ));
+        return out;
+    }
+    if rs.contains("could not attach the direct nvngx_dlssnr.dll runtime")
+        || rs.contains("nvngx_dlssnr.dll missing")
+    {
+        out.push(bad(
+            "ShortFuse's add-on could not load the DLSS 5 model (nvngx_dlssnr.dll). Install              again to put it back beside the game.",
+        ));
+    }
+    if rs.contains("NR device feature initialization failed") {
+        out.push(bad(
+            "The neural rendering feature failed to start in ShortFuse's add-on. The driver              must be recent (616 or later) and the card an RTX one.",
+        ));
+    }
+    let failed = rs.matches("NR evaluation failed").count();
+    let ran: u64 = rs
+        .lines()
+        .filter_map(|l| {
+            let i = l.find("after ")?;
+            let rest = &l[i + 6..];
+            rest.strip_suffix(" successful evaluations")
+                .or_else(|| rest.split(" successful evaluations").next())
+                .and_then(|n| n.trim().parse().ok())
+        })
+        .max()
+        .unwrap_or(0);
+    if ran > 0 {
+        out.push(ok(format!(
+            "Neural rendering ran: {ran} successful evaluations in the last session."
+        )));
+    } else if failed > 0 {
+        out.push(bad(format!(
+            "Neural rendering evaluation failed {failed} times in ShortFuse's add-on."
+        )));
+    } else {
+        out.push(warn(
+            "No finished evaluation in the log yet. Turn the pass on in ShortFuse's panel              (Home, Add-ons tab), play a minute, close the game, and run Diagnose again.",
+        ));
+    }
+    out
+}
+
 fn upstream_findings(rs: &str) -> Vec<Finding> {
     let mut out = Vec::new();
     if let Some(l) = rs
@@ -1422,5 +1499,29 @@ Registered add-on \"DLSS 5 Neural Rendering\"
             "{f:?}"
         );
         assert!(f.iter().any(|x| x.text.contains("Depth is flat")), "{f:?}");
+    }
+
+    /// ShortFuse's add-on is read by its own log lines: attached, model
+    /// missing, and the evaluation count it prints when it detaches.
+    #[test]
+    fn shortfuse_log_is_read_by_its_own_lines() {
+        let good = "RenoDX DLSS attached.
+Init_Ext succeeded for device 1
+detached signed snippet after 4312 successful evaluations
+";
+        let f = sf_findings(good);
+        assert!(f.iter().any(|x| x.text.contains("4312")), "{f:?}");
+        let nomodel = "RenoDX DLSS attached.
+RenoDX DLSS could not attach the direct nvngx_dlssnr.dll runtime.
+";
+        assert!(sf_findings(nomodel)
+            .iter()
+            .any(|x| x.text.contains("nvngx_dlssnr.dll")));
+        assert!(sf_findings(
+            "Initializing crosire's ReShade
+"
+        )
+        .iter()
+        .any(|x| x.text.contains("never attached")));
     }
 }
