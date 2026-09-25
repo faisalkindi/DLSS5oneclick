@@ -23,6 +23,9 @@ pub struct Settings {
     /// Soft overlay UX defaults (cfg keys the Feeder reads).
     #[serde(default)]
     pub overlay: OverlayDefaults,
+    /// The Setup page opens with the advanced options shown (#77).
+    #[serde(default)]
+    pub advanced_open: bool,
 }
 
 fn default_quality() -> String {
@@ -82,6 +85,7 @@ impl Default for Settings {
             quality: default_quality(),
             knobs: KnobDefaults::default(),
             overlay: OverlayDefaults::default(),
+            advanced_open: false,
         }
     }
 }
@@ -121,12 +125,17 @@ impl Settings {
                 evaluate_stride: 1,
                 log_frames: 3,
             },
+            advanced_open: false,
         }
     }
 
     /// Restore knobs / overlay / quality seed to [`Self::feeder_stock`].
     pub fn reset_to_feeder_defaults(&mut self) {
+        // Only the Feeder values: whether advanced options are shown is a
+        // window preference, not a Feeder default.
+        let advanced_open = self.advanced_open;
         *self = Self::feeder_stock();
+        self.advanced_open = advanced_open;
     }
 
     pub fn path() -> PathBuf {

@@ -447,7 +447,7 @@ impl App {
             self.renodx_steady = tag.as_deref() == Some(installer::RENODX_STEADY_TAG);
         } else if let Some(p) = setup::current(&st) {
             if first {
-                self.advanced = false;
+                self.advanced = self.settings.advanced_open;
             }
             self.engine = p.engine;
             self.consumer = p.consumer;
@@ -457,7 +457,7 @@ impl App {
         } else if first {
             // Nothing on the ladder fits (a Vulkan game with no DLSS of its
             // own): nothing from the previous game carries over.
-            self.advanced = false;
+            self.advanced = self.settings.advanced_open;
             self.engine = Engine::ReShade;
             self.upstream_on = false;
             self.consumer = installer::Consumer::Dlss5;
@@ -2279,15 +2279,14 @@ impl App {
                 .color(t::TEXT),
         );
         if self.knobs.is_none() {
-            if let Some(err) = &self.knobs_err {
+            if self.knobs_err.is_some() {
+                // The Install button above is the one to press; a second one
+                // here read as two different installs (#77).
                 ui.label(
-                    RichText::new(err.clone())
+                    RichText::new("These appear once DLSS5-Feeder is installed in this game.")
                         .font(t::plex(12.0))
                         .color(t::TEXT_MUTED),
                 );
-                if ui.button("Install DLSS 5").clicked() {
-                    self.start(None);
-                }
             } else {
                 ui.label(
                     RichText::new("Select a game first.")
@@ -3261,6 +3260,9 @@ impl eframe::App for App {
                         // to: Advanced stays open for it.
                         if ui.add_enabled(!self.running && !hand, adv).clicked() {
                             self.advanced = !self.advanced;
+                            // Remembered for the next game and the next start (#77).
+                            self.settings.advanced_open = self.advanced;
+                            let _ = self.settings.save();
                             if !self.advanced {
                                 // Closing Advanced returns to the picker's
                                 // setup and the game's own options.
@@ -4053,8 +4055,16 @@ impl eframe::App for App {
                     }
                 }
 
-                // Offline knobs / expected FPS from Feeder perf log.
-                self.knobs_panel(ui);
+                // Offline knobs / expected FPS from Feeder perf log. Only for a
+                // game on the Feeder route: a game with its own DLSS has no
+                // Feeder and nothing to tune here (#77).
+                if ok_status
+                    .as_ref()
+                    .is_some_and(|s| s.mode == game::Mode::Feeder)
+                    && self.engine == Engine::ReShade
+                {
+                    self.knobs_panel(ui);
+                }
 
                 // ── progress ──────────────────────────────────────
                 let (bar, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 4.0), egui::Sense::hover());
