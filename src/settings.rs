@@ -26,6 +26,9 @@ pub struct Settings {
     /// The Setup page opens with the advanced options shown (#77).
     #[serde(default)]
     pub advanced_open: bool,
+    /// The DLSS 5 add-on follows release candidates, not only stable builds (#77).
+    #[serde(default)]
+    pub renodx_prerelease: bool,
 }
 
 fn default_quality() -> String {
@@ -86,6 +89,7 @@ impl Default for Settings {
             knobs: KnobDefaults::default(),
             overlay: OverlayDefaults::default(),
             advanced_open: false,
+            renodx_prerelease: false,
         }
     }
 }
@@ -126,6 +130,7 @@ impl Settings {
                 log_frames: 3,
             },
             advanced_open: false,
+            renodx_prerelease: false,
         }
     }
 
@@ -133,9 +138,10 @@ impl Settings {
     pub fn reset_to_feeder_defaults(&mut self) {
         // Only the Feeder values: whether advanced options are shown is a
         // window preference, not a Feeder default.
-        let advanced_open = self.advanced_open;
+        let (advanced_open, renodx_prerelease) = (self.advanced_open, self.renodx_prerelease);
         *self = Self::feeder_stock();
         self.advanced_open = advanced_open;
+        self.renodx_prerelease = renodx_prerelease;
     }
 
     pub fn path() -> PathBuf {

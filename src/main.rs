@@ -162,7 +162,17 @@ error: {e:#}"
             std::process::exit(1);
         }
     }
-    if let Some(a) = args.iter().find_map(|a| a.strip_prefix("--addon=")) {
+    // Release candidates of the DLSS 5 add-on: asked for here, or saved in the
+    // settings from the GUI's advanced options (#77).
+    if args.iter().any(|a| a == "--addon=rc") || crate::settings::Settings::load().renodx_prerelease
+    {
+        std::env::set_var(installer::RENODX_PRERELEASE_ENV, "1");
+    }
+    if let Some(a) = args
+        .iter()
+        .find_map(|a| a.strip_prefix("--addon="))
+        .filter(|a| *a != "rc")
+    {
         // "latest" is the newest stable build; a bare number becomes a tag.
         let v = if a.eq_ignore_ascii_case("latest") || a.starts_with("renodx-dlss5-") {
             a.to_owned()

@@ -645,6 +645,11 @@ impl App {
         if switch_engine && st.as_ref().is_some_and(|g| g.renodx_mod.is_some()) {
             with_renodx = true;
         }
+        if self.settings.renodx_prerelease {
+            std::env::set_var(installer::RENODX_PRERELEASE_ENV, "1");
+        } else {
+            std::env::remove_var(installer::RENODX_PRERELEASE_ENV);
+        }
         if self.ada_mfg {
             std::env::set_var(installer::ADA_MFG_ENV, "1");
         } else {
@@ -3306,6 +3311,23 @@ impl eframe::App for App {
                         .changed()
                     {
                         self.renodx_steady = steady;
+                    }
+                    // Saved with the settings: it applies to every game (#77).
+                    let mut pre = self.settings.renodx_prerelease;
+                    let cb = egui::Checkbox::new(
+                        &mut pre,
+                        RichText::new(
+                            "DLSS 5 add-on: include release candidates (7.0.0-rc and similar test builds) when installing or updating to the newest build \u{2014} they fix some bugs sooner and break others",
+                        )
+                        .font(t::plex(11.5))
+                        .color(t::TEXT_SOFT),
+                    );
+                    if ui
+                        .add_enabled(!self.running && !self.renodx_classic && !self.renodx_steady, cb)
+                        .changed()
+                    {
+                        self.settings.renodx_prerelease = pre;
+                        let _ = self.settings.save();
                     }
                 }
                 // RTX 40 multi-frame generation on the ReShade route: a single

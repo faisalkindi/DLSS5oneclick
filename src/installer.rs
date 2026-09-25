@@ -332,6 +332,8 @@ pub struct Latest {
     /// Newest stable ShortFuse add-on and RenoDX DLSS 5 add-on builds.
     pub sf: Option<String>,
     pub dlss5: Option<String>,
+    /// Newest DLSS 5 add-on build including release candidates.
+    pub dlss5_pre: Option<String>,
 }
 
 impl Latest {
@@ -361,6 +363,11 @@ impl Latest {
             aio: net::latest_tag(client, AIO_REPO).ok(),
             sf: rhi(client, SF_PREFIX),
             dlss5: rhi(client, DLSS5_PREFIX),
+            dlss5_pre: list
+                .as_ref()
+                .and_then(|l| l.as_array())
+                .and_then(|a| pick_latest_asset_with(a, DLSS5_PREFIX, true).ok())
+                .map(|(t, _)| t),
         }
     }
 }
@@ -477,12 +484,16 @@ pub fn stale_components(dir: &Path, latest: &Latest) -> Vec<String> {
         mine(game::DLSS5_ADDON_MARKER).filter(|_| dir.join(game::DLSS5_ADDON).is_file())
     {
         let h = have.trim();
-        let ahead = latest
-            .dlss5
+        let want = if crate::settings::Settings::load().renodx_prerelease {
+            &latest.dlss5_pre
+        } else {
+            &latest.dlss5
+        };
+        let ahead = want
             .as_deref()
             .is_some_and(|w| newer_tag(h, w, DLSS5_PREFIX));
         if h != RENODX_STEADY_TAG && h != RENODX_CLASSIC_TAG && !ahead {
-            check("DLSS 5 add-on", Some(have), &latest.dlss5);
+            check("DLSS 5 add-on", Some(have), want);
         }
     }
     if let Ok(m) = fs::read_to_string(dir.join(game::OPTI_MANIFEST)) {
@@ -1500,12 +1511,32 @@ fn plan_reshade_consumer_with(st: &GameStatus, upstream: bool, c: Consumer) -> V
 
 // ── release picking ────────────────────────────────────────────────
 
-fn ver_key(tag: &str, prefix: &str) -> Vec<u64> {
-    Regex::new(r"\d+")
-        .unwrap()
-        .find_iter(&tag[prefix.len()..])
-        .filter_map(|m| m.as_str().parse().ok())
-        .collect()
+/// A version to sort by: the release numbers, then 1 for a stable build and 0
+/// for a release candidate or beta, then the candidate's own number. So
+/// 7.0.0 beats 7.0.0-rc8, which beats 7.0.0-rc1, which beats 6.5.3. Reading
+/// every number in a row put 7.0.0-rc8 ([7, 0, 0, 8]) above 7.0.0 ([7, 0, 0]).
+pub type VerKey = (Vec<u64>, u8, Vec<u64>);
+
+fn ver_key(tag: &str, prefix: &str) -> VerKey {
+    let rest = &tag[prefix.len().min(tag.len())..];
+    let nums = |t: &str| -> Vec<u64> {
+        Regex::new(r"\d+")
+            .unwrap()
+            .find_iter(t)
+            .filter_map(|m| m.as_str().parse().ok())
+            .collect()
+    };
+    if prerelease_tag_name(rest) {
+        let lower = rest.to_ascii_lowercase();
+        let cut = ["-rc", "beta", "alpha", "-pre"]
+            .iter()
+            .filter_map(|m| lower.find(m))
+            .min()
+            .unwrap_or(rest.len());
+        (nums(&rest[..cut]), 0, nums(&rest[cut..]))
+    } else {
+        (nums(rest), 1, Vec::new())
+    }
 }
 
 /// A release candidate or beta by its tag. rhi-repo marks none of its
@@ -1520,7 +1551,16 @@ pub fn prerelease_tag_name(tag: &str) -> bool {
 
 /// Newest rhi-repo release whose tag is `prefix` + digits; returns (tag, first asset URL).
 pub fn pick_latest_asset(releases: &[Value], prefix: &str) -> Result<(String, String)> {
-    let cands: Vec<(Vec<u64>, String, String)> = releases
+    pick_latest_asset_with(releases, prefix, false)
+}
+
+/// As `pick_latest_asset`, taking release candidates too when `pre` is set.
+pub fn pick_latest_asset_with(
+    releases: &[Value],
+    prefix: &str,
+    pre: bool,
+) -> Result<(String, String)> {
+    let cands: Vec<(VerKey, String, String)> = releases
         .iter()
         .filter_map(|r| {
             let tag = r.get("tag_name")?.as_str()?;
@@ -1528,7 +1568,7 @@ pub fn pick_latest_asset(releases: &[Value], prefix: &str) -> Result<(String, St
             if !rest.chars().next()?.is_ascii_digit() {
                 return None; // "dlss-" must not match "dlssg-"
             }
-            if prerelease_tag_name(tag) {
+            if prerelease_tag_name(tag) && !pre {
                 return None;
             }
             let url = r
@@ -1548,7 +1588,7 @@ pub fn pick_latest_asset(releases: &[Value], prefix: &str) -> Result<(String, St
 
 /// Newest by version; for the DLSS 5 model prefer ShortFuse's multi-generation
 /// `.SF` builds over NVIDIA's RTX-50-only originals or single-generation ports.
-fn best_tag(mut cands: Vec<(Vec<u64>, String, String)>) -> (String, String) {
+fn best_tag(mut cands: Vec<(VerKey, String, String)>) -> (String, String) {
     let any_sf = cands
         .iter()
         .any(|(_, t, _)| t.starts_with("dlssnr-") && t.contains(".SF"));
@@ -1576,6 +1616,14 @@ pub const RENODX_TAG_ENV: &str = "DLSS5ONECLICK_RENODX_TAG";
 pub const RENODX_STEADY_TAG: &str = "renodx-dlss5-4.70";
 /// The env value that asks for the newest build (the default when unset).
 pub const RENODX_LATEST: &str = "latest";
+/// Set when the user opted into release candidates of the DLSS 5 add-on: the
+/// newest-build step then takes the newest build, candidate or not (#77).
+pub const RENODX_PRERELEASE_ENV: &str = "DLSS5ONECLICK_RENODX_PRERELEASE";
+
+pub fn renodx_prerelease() -> bool {
+    std::env::var_os(RENODX_PRERELEASE_ENV).is_some()
+}
+
 /// Set beside `RENODX_TAG_ENV` when the setup picker chose the build rather
 /// than the user: a picker's 4.70 still gives way to 4.55 on a machine whose
 /// log reports the newer builds faulting in the driver (#69).
@@ -1624,7 +1672,7 @@ pub fn rhi_newest(client: &Client, prefix: &str) -> Result<(String, String)> {
         }
     }
     let tags = net::github_release_tags_html(client, RHI_REPO, prefix, 6)?;
-    let mut cands: Vec<(Vec<u64>, String)> = tags
+    let mut cands: Vec<(VerKey, String)> = tags
         .into_iter()
         .filter(|t| {
             t[prefix.len()..]
@@ -1666,6 +1714,15 @@ pub fn rhi_latest(client: &Client, prefix: &str) -> Result<(String, String)> {
     if let Some(pinned) = rhi_pinned(client, prefix) {
         return pinned;
     }
+    if prefix == DLSS5_PREFIX && renodx_prerelease() {
+        if let Ok(releases) = net::get_json_github(client, RHI_RELEASES) {
+            if let Some(arr) = releases.as_array() {
+                if let Ok(r) = pick_latest_asset_with(arr, prefix, true) {
+                    return Ok(r);
+                }
+            }
+        }
+    }
     if let Ok(releases) = net::get_json_github(client, RHI_RELEASES) {
         if let Some(arr) = releases.as_array() {
             if let Ok(r) = pick_latest_asset(arr, prefix) {
@@ -1674,7 +1731,7 @@ pub fn rhi_latest(client: &Client, prefix: &str) -> Result<(String, String)> {
         }
     }
     let tags = net::github_release_tags_html(client, RHI_REPO, prefix, 6)?;
-    let cands: Vec<(Vec<u64>, String, String)> = tags
+    let cands: Vec<(VerKey, String, String)> = tags
         .into_iter()
         .filter(|t| {
             t[prefix.len()..]
@@ -4701,6 +4758,7 @@ RestoreComputeSignature=true
             dlssnr: Some("dlssnr-310.8.SF-v2".into()),
             sf: None,
             dlss5: None,
+            dlss5_pre: None,
             aio: None,
         };
         assert!(stale_components(d, &latest).is_empty());
@@ -4746,6 +4804,7 @@ RestoreComputeSignature=true
             dlssnr: None,
             sf: None,
             dlss5: None,
+            dlss5_pre: None,
             aio: None,
         };
 
@@ -5316,5 +5375,36 @@ AmpereMfgUnlock=true
         assert!(!stale_components(t.path(), &latest)
             .iter()
             .any(|c| c.contains("DLSS 5 add-on")));
+    }
+
+    /// A stable build beats its own release candidates, which beat each other
+    /// by number and every older version.
+    #[test]
+    fn release_candidates_sort_below_their_stable_build() {
+        let k = |t: &str| ver_key(t, DLSS5_PREFIX);
+        assert!(k("renodx-dlss5-7.0.0") > k("renodx-dlss5-7.0.0-rc8"));
+        assert!(k("renodx-dlss5-7.0.0-rc8") > k("renodx-dlss5-7.0.0-rc1"));
+        assert!(k("renodx-dlss5-7.0.0-rc1") > k("renodx-dlss5-6.5.3"));
+        assert!(k("renodx-dlss5-6.5.3") > k("renodx-dlss5-4.70"));
+        assert!(newer_tag(
+            "renodx-dlss5-7.0.0",
+            "renodx-dlss5-7.0.0-rc8",
+            DLSS5_PREFIX
+        ));
+        assert!(!newer_tag(
+            "renodx-dlss5-7.0.0-rc8",
+            "renodx-dlss5-7.0.0",
+            DLSS5_PREFIX
+        ));
+        let rel = |t: &str| serde_json::json!({"tag_name": t, "assets": [{"browser_download_url": format!("https://x/{t}.zip")}]});
+        let arr = vec![rel("renodx-dlss5-7.0.0-rc8"), rel("renodx-dlss5-6.5.3")];
+        assert_eq!(
+            pick_latest_asset_with(&arr, DLSS5_PREFIX, true).unwrap().0,
+            "renodx-dlss5-7.0.0-rc8"
+        );
+        assert_eq!(
+            pick_latest_asset_with(&arr, DLSS5_PREFIX, false).unwrap().0,
+            "renodx-dlss5-6.5.3"
+        );
     }
 }
