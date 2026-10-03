@@ -3763,7 +3763,7 @@ impl eframe::App for App {
                     }
                 }
                 if self.engine == Engine::Opti {
-                    ui.add_space(6.0);
+                    ui.add_space(14.0);
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 8.0;
                         ui.label(
@@ -3951,7 +3951,7 @@ impl eframe::App for App {
                     }
                 }
                 if self.engine == Engine::ReShade {
-                    ui.add_space(6.0);
+                    ui.add_space(14.0);
                     if !native {
                         self.upstream_on = false;
                     }
