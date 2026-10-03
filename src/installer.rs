@@ -293,6 +293,18 @@ pub enum Engine {
 
 const RTXMFG_REPO: &str = "dashdogy/RTX40MFG-Unlock";
 
+/// Set (to anything) to put Universal RTXMFG beside the DLSS 5 setup as well.
+pub const RTXMFG_WITH_ENV: &str = "DLSS5ONECLICK_RTXMFG";
+
+fn rtxmfg_with_env() -> bool {
+    std::env::var_os(RTXMFG_WITH_ENV).is_some()
+}
+
+const STEP_RTXMFG_WITH: Step = Step {
+    name: "Universal RTXMFG (beside DLSS 5)",
+    run: step_rtxmfg_with,
+};
+
 const STEP_RTXMFG: Step = Step {
     name: "Universal RTXMFG (multi-frame generation only)",
     run: step_rtxmfg,
@@ -1456,6 +1468,15 @@ pub fn plan_with(st: &GameStatus, engine: Engine, with_renodx: bool, upstream: b
     // RTXMFG sits in the name ReShade and OptiScaler need.
     if st.rtxmfg {
         v.insert(0, STEP_RTXMFG_CLEANUP);
+    }
+    // Multi-frame generation from RTXMFG beside the DLSS 5 setup, under a name
+    // of its own. A copy already placed that way is refreshed whichever way
+    // Install was started.
+    if (rtxmfg_with_env() || st.rtxmfg_with)
+        && !st.is32()
+        && game::rtxmfg_side_name(&st.exe, st.api).is_some()
+    {
+        v.push(STEP_RTXMFG_WITH);
     }
     // DX9 never loads dxgi.dll; dgVoodoo must sit in the game folder first.
     // Always run on Dx9 (even when the DLL is already present) so Install can
@@ -2720,9 +2741,32 @@ fn step_rtxmfg(
     work: &Path,
     progress: Progress,
 ) -> Result<Vec<String>> {
+    rtxmfg_install(client, st, work, progress, false)
+}
+
+fn step_rtxmfg_with(
+    client: &Client,
+    st: &GameStatus,
+    work: &Path,
+    progress: Progress,
+) -> Result<Vec<String>> {
+    rtxmfg_install(client, st, work, progress, true)
+}
+
+fn rtxmfg_install(
+    client: &Client,
+    st: &GameStatus,
+    work: &Path,
+    progress: Progress,
+    with_dlss5: bool,
+) -> Result<Vec<String>> {
     let d = st.game_dir();
-    let want = game::rtxmfg_proxy_for(&st.exe, st.api)
-        .ok_or_else(|| anyhow!("Universal RTXMFG does not cover {}", st.api.label()))?;
+    let want = if with_dlss5 {
+        game::rtxmfg_side_name(&st.exe, st.api)
+    } else {
+        game::rtxmfg_proxy_for(&st.exe, st.api)
+    }
+    .ok_or_else(|| anyhow!("Universal RTXMFG does not cover {}", st.api.label()))?;
     let marker = d.join(game::RTXMFG_MARKER);
     let mine = fs::read_to_string(&marker).ok();
     let mine_proxy = mine
@@ -2768,7 +2812,8 @@ fn step_rtxmfg(
         .ok_or_else(|| anyhow!("the RTXMFG release has no RTXMFG.dll - layout changed upstream"))?;
     net::extract_member(&mut zip, &member, &dest)?;
     let len = fs::metadata(&dest)?.len();
-    fs::write(&marker, format!("{tag}\n{proxy}\n{len}"))?;
+    let side = if with_dlss5 { "\nwith-dlss5" } else { "" };
+    fs::write(&marker, format!("{tag}\n{proxy}\n{len}{side}"))?;
     Ok(vec![format!("{proxy} (RTXMFG {tag})")])
 }
 
@@ -3615,6 +3660,11 @@ pub fn run_all_with(
     let mut st = game::inspect(exe)?;
     if !st.problems.is_empty() {
         bail!("{}", st.problems.join("\n"));
+    }
+    if engine != Engine::Mfg && rtxmfg_with_env() && (ada_mfg() == "true" || ampere_mfg()) {
+        bail!(
+            "Universal RTXMFG and the OptiScaler build's own RTX 20/30/40 multi-frame generation unlock cannot run together; untick one of them."
+        );
     }
     if engine == Engine::Mfg {
         if st.is32() {
@@ -5454,6 +5504,47 @@ RestoreComputeSignature=true
         assert_eq!(
             game::rtxmfg_proxy_for(Path::new(r"C:\g\game.exe"), game::Api::Dx12),
             Some("dxgi.dll")
+        );
+    }
+
+    /// RTXMFG beside DLSS 5 takes the last step before the GPU preference, in
+    /// a name of its own (never dxgi.dll), and is read back from the marker's
+    /// fourth line.
+    #[test]
+    fn rtxmfg_beside_dlss5_has_its_own_step_and_name() {
+        let named = |v: &[Step]| -> Vec<&'static str> { v.iter().map(|s| s.name).collect() };
+        let mut st = game::stub_status(game::Mode::Feeder, game::Api::Dx12);
+        st.rtxmfg_with = true;
+        let plan = named(&plan_with(&st, Engine::ReShade, false, false));
+        let n = plan.len();
+        assert_eq!(plan[n - 2], STEP_RTXMFG_WITH.name);
+        assert_eq!(plan[n - 1], STEP_GPU_PREF.name);
+        assert!(!plan.contains(&STEP_RTXMFG_CLEANUP.name));
+        assert_eq!(
+            game::rtxmfg_side_name(Path::new(r"C:\g\game.exe"), game::Api::Dx12),
+            Some("version.dll")
+        );
+        assert_eq!(
+            game::rtxmfg_side_name(Path::new(r"C:\g\witcher3.exe"), game::Api::Dx12),
+            Some("winmm.dll")
+        );
+
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path();
+        fs::write(d.join("version.dll"), b"x").unwrap();
+        fs::write(
+            d.join(game::RTXMFG_MARKER),
+            "v1.4.1\nversion.dll\n1\nwith-dlss5",
+        )
+        .unwrap();
+        assert_eq!(
+            game::rtxmfg_marker(d),
+            Some(("version.dll".to_owned(), true))
+        );
+        fs::write(d.join(game::RTXMFG_MARKER), "v1.4.1\nversion.dll\n1").unwrap();
+        assert_eq!(
+            game::rtxmfg_marker(d),
+            Some(("version.dll".to_owned(), false))
         );
     }
 

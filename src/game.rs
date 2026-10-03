@@ -1152,6 +1152,8 @@ pub struct GameStatus {
     pub aio: bool,
     /// Universal RTXMFG alone: no ReShade, no DLSS 5 (the "MFG only" setup).
     pub rtxmfg: bool,
+    /// Universal RTXMFG placed beside a DLSS 5 setup (its own proxy name).
+    pub rtxmfg_with: bool,
     /// The RTX 40 multi-frame-generation add-on is already beside the game.
     pub mfg: bool,
     /// Unreal-style layout / Shipping exe (heuristic).
@@ -1204,6 +1206,7 @@ pub(crate) fn stub_status(mode: Mode, api: Api) -> GameStatus {
         upstream: false,
         aio: false,
         rtxmfg: false,
+        rtxmfg_with: false,
         mfg: false,
         unreal_likely: false,
         unity_likely: false,
@@ -1564,7 +1567,8 @@ pub fn inspect(exe: &Path) -> Result<GameStatus> {
         opti: d.join(OPTI_MANIFEST).is_file(),
         upstream: d.join(UPSTREAM_ADDON).is_file(),
         aio: d.join(AIO_ADDON).is_file(),
-        rtxmfg: rtxmfg_proxy(d).is_some(),
+        rtxmfg: rtxmfg_marker(d).is_some_and(|(_, with)| !with),
+        rtxmfg_with: rtxmfg_marker(d).is_some_and(|(_, with)| with),
         mfg: d.join(MFG_ADDON).is_file(),
         gpu,
         exe: exe.to_path_buf(),
@@ -1930,12 +1934,33 @@ pub fn find_rtxmfg_copy(dir: &Path) -> Option<String> {
         .map(|n| (*n).to_owned())
 }
 
+/// The name RTXMFG goes in as beside a DLSS 5 setup: ReShade and OptiScaler
+/// hold `dxgi.dll`, so `version.dll` (or `winmm.dll` for The Witcher 3).
+pub fn rtxmfg_side_name(exe: &Path, api: Api) -> Option<&'static str> {
+    let own = rtxmfg_proxy_for(exe, api)?;
+    Some(if own == "dxgi.dll" {
+        "version.dll"
+    } else {
+        own
+    })
+}
+
+/// What this tool recorded for the RTXMFG it placed in `dir`: the proxy file
+/// name (when that file is still there) and whether it sits beside a DLSS 5
+/// setup (a fourth marker line) rather than alone.
+pub fn rtxmfg_marker(dir: &Path) -> Option<(String, bool)> {
+    let text = fs::read_to_string(dir.join(RTXMFG_MARKER)).ok()?;
+    let mut lines = text.lines();
+    let name = lines.nth(1)?.trim().to_owned();
+    let with = lines.nth(1).is_some_and(|l| l.trim() == "with-dlss5");
+    (!name.is_empty() && !name.contains(['/', '\\']) && dir.join(&name).is_file())
+        .then_some((name, with))
+}
+
 /// The RTXMFG proxy this tool placed in `dir`: its marker's second line, when
 /// that file is still there.
 pub fn rtxmfg_proxy(dir: &Path) -> Option<String> {
-    let text = fs::read_to_string(dir.join(RTXMFG_MARKER)).ok()?;
-    let name = text.lines().nth(1)?.trim().to_owned();
-    (!name.is_empty() && !name.contains(['/', '\\']) && dir.join(&name).is_file()).then_some(name)
+    rtxmfg_marker(dir).map(|(name, _)| name)
 }
 
 /// Sidecar markers this tool leaves so Install / Update / Remove know the folder.

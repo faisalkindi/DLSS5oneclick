@@ -113,6 +113,8 @@ pub struct App {
     advanced: bool,
     /// OptiScaler route, RTX 40 only: the fork's built-in MFG unlock (#83).
     ada_mfg: bool,
+    /// Universal RTXMFG beside the DLSS 5 setup (not alone).
+    rtxmfg_with: bool,
     /// OptiScaler route, D3D12, any RTX: FSR 3.1 frame generation (2X).
     opti_fg: bool,
     renodx: RenodxLookup,
@@ -299,6 +301,7 @@ impl App {
             consumer: installer::Consumer::Dlss5,
             advanced: false,
             ada_mfg: false,
+            rtxmfg_with: false,
             opti_fg: false,
             renodx: RenodxLookup::Idle,
             renodx_rx: None,
@@ -410,6 +413,7 @@ impl App {
         // does not silently drop it (#83). Remove takes the file away, and
         // the tick follows it.
         self.ada_mfg = matches!(&self.status, Some(Ok(s)) if s.mfg);
+        self.rtxmfg_with = matches!(&self.status, Some(Ok(s)) if s.rtxmfg_with);
         self.ampere_mfg = self
             .status
             .as_ref()
@@ -686,6 +690,13 @@ impl App {
             std::env::set_var(installer::RENODX_STABLE_ENV, "1");
         } else {
             std::env::remove_var(installer::RENODX_STABLE_ENV);
+        }
+        if self.rtxmfg_with && engine != Engine::Mfg {
+            std::env::set_var(installer::RTXMFG_WITH_ENV, "1");
+            // Two multi-frame-generation unlocks in one game fight each other.
+            self.ada_mfg = false;
+        } else {
+            std::env::remove_var(installer::RTXMFG_WITH_ENV);
         }
         if self.ada_mfg {
             std::env::set_var(installer::ADA_MFG_ENV, "1");
@@ -3543,7 +3554,10 @@ impl eframe::App for App {
                         .font(t::plex(11.5))
                         .color(t::TEXT_SOFT),
                     );
-                    if ui.add_enabled(!self.running, cb).changed() {
+                    if ui
+                        .add_enabled(!self.running && !self.rtxmfg_with, cb)
+                        .changed()
+                    {
                         self.ada_mfg = on;
                     }
                 }
@@ -3713,6 +3727,27 @@ impl eframe::App for App {
                         );
                     }
                 }
+                // The same DLL beside DLSS 5, under a name of its own, for
+                // games where the OptiScaler build's built-in unlock does not
+                // take. The two unlocks cannot share a game, so the build's own
+                // tick is greyed out while this one is on.
+                if mfg_ok && self.engine != Engine::Mfg {
+                    let mut on = self.rtxmfg_with;
+                    let cb = egui::Checkbox::new(
+                        &mut on,
+                        RichText::new(
+                            "Also install Universal RTXMFG (dashdogy) beside DLSS 5 for multi-frame generation \u{00b7} experimental. Replaces the build's own RTX 40 unlock; the game must have DLSS Frame Generation of its own",
+                        )
+                        .font(t::plex(11.5))
+                        .color(t::TEXT_SOFT),
+                    );
+                    if ui.add_enabled(!self.running, cb).changed() {
+                        self.rtxmfg_with = on;
+                        if on {
+                            self.ada_mfg = false;
+                        }
+                    }
+                }
                 if self.engine == Engine::Opti {
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
@@ -3774,7 +3809,10 @@ impl eframe::App for App {
                             .font(t::plex(11.5))
                             .color(t::TEXT_SOFT),
                         );
-                        if ui.add_enabled(!self.running, cb).changed() {
+                        if ui
+                            .add_enabled(!self.running && !self.rtxmfg_with, cb)
+                            .changed()
+                        {
                             self.ada_mfg = on;
                         }
                     }
