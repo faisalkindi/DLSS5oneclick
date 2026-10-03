@@ -3697,57 +3697,6 @@ impl eframe::App for App {
                         self.engine = Engine::Aio;
                     }
                 }
-                // Multi-frame generation without DLSS 5: dashdogy's RTXMFG as
-                // one DLL, no ReShade. It takes the place of the cards above.
-                let mfg_ok = ok_status
-                    .as_ref()
-                    .is_some_and(|s| !s.is32() && game::rtxmfg_proxy_name(s.api).is_some());
-                if !mfg_ok && self.engine == Engine::Mfg {
-                    self.engine = Engine::ReShade;
-                }
-                ui.add_space(6.0);
-                {
-                    let mut only = self.engine == Engine::Mfg;
-                    let cb = egui::Checkbox::new(
-                        &mut only,
-                        RichText::new(
-                            "Multi-frame generation only \u{00b7} experimental: install Universal RTXMFG (dashdogy) and nothing else, no DLSS 5 and no ReShade. The game must have DLSS Frame Generation of its own; Backspace opens its menu",
-                        )
-                        .font(t::plex(11.5))
-                        .color(t::TEXT_SOFT),
-                    );
-                    if ui.add_enabled(mfg_ok && !self.running, cb).changed() {
-                        self.engine = if only { Engine::Mfg } else { Engine::ReShade };
-                    }
-                    if !mfg_ok {
-                        ui.label(
-                            RichText::new("64-bit DirectX 11/12 and Vulkan games only.")
-                                .font(t::plex(11.0))
-                                .color(t::TEXT_DIM),
-                        );
-                    }
-                }
-                // The same DLL beside DLSS 5, under a name of its own, for
-                // games where the OptiScaler build's built-in unlock does not
-                // take. The two unlocks cannot share a game, so the build's own
-                // tick is greyed out while this one is on.
-                if mfg_ok && self.engine != Engine::Mfg {
-                    let mut on = self.rtxmfg_with;
-                    let cb = egui::Checkbox::new(
-                        &mut on,
-                        RichText::new(
-                            "Also install Universal RTXMFG (dashdogy) beside DLSS 5 for multi-frame generation \u{00b7} experimental. Replaces the build's own RTX 40 unlock; the game must have DLSS Frame Generation of its own",
-                        )
-                        .font(t::plex(11.5))
-                        .color(t::TEXT_SOFT),
-                    );
-                    if ui.add_enabled(!self.running, cb).changed() {
-                        self.rtxmfg_with = on;
-                        if on {
-                            self.ada_mfg = false;
-                        }
-                    }
-                }
                 if self.engine == Engine::Opti {
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
@@ -4108,6 +4057,64 @@ impl eframe::App for App {
                             });
                     }
                 }
+                ui.add_space(10.0);
+                ui.label(
+                    RichText::new("MULTI-FRAME GENERATION")
+                        .font(t::plex_semibold(11.0))
+                        .color(t::TEXT_MUTED),
+                );
+                // Multi-frame generation without DLSS 5: dashdogy's RTXMFG as
+                // one DLL, no ReShade. It takes the place of the cards above.
+                let mfg_ok = ok_status
+                    .as_ref()
+                    .is_some_and(|s| !s.is32() && game::rtxmfg_proxy_name(s.api).is_some());
+                if !mfg_ok && self.engine == Engine::Mfg {
+                    self.engine = Engine::ReShade;
+                }
+                ui.add_space(6.0);
+                {
+                    let mut only = self.engine == Engine::Mfg;
+                    let cb = egui::Checkbox::new(
+                        &mut only,
+                        RichText::new(
+                            "Multi-frame generation only \u{00b7} experimental: install Universal RTXMFG (dashdogy) and nothing else, no DLSS 5 and no ReShade. The game must have DLSS Frame Generation of its own; Backspace opens its menu",
+                        )
+                        .font(t::plex(11.5))
+                        .color(t::TEXT_SOFT),
+                    );
+                    if ui.add_enabled(mfg_ok && !self.running, cb).changed() {
+                        self.engine = if only { Engine::Mfg } else { Engine::ReShade };
+                    }
+                    if !mfg_ok {
+                        ui.label(
+                            RichText::new("64-bit DirectX 11/12 and Vulkan games only.")
+                                .font(t::plex(11.0))
+                                .color(t::TEXT_DIM),
+                        );
+                    }
+                }
+                // The same DLL beside DLSS 5, under a name of its own, for
+                // games where the OptiScaler build's built-in unlock does not
+                // take. The two unlocks cannot share a game, so the build's own
+                // tick is greyed out while this one is on.
+                if mfg_ok && self.engine != Engine::Mfg {
+                    let mut on = self.rtxmfg_with;
+                    let cb = egui::Checkbox::new(
+                        &mut on,
+                        RichText::new(
+                            "Also install Universal RTXMFG (dashdogy) beside DLSS 5 for multi-frame generation \u{00b7} experimental. Replaces the build's own RTX 40 unlock; the game must have DLSS Frame Generation of its own",
+                        )
+                        .font(t::plex(11.5))
+                        .color(t::TEXT_SOFT),
+                    );
+                    if ui.add_enabled(!self.running, cb).changed() {
+                        self.rtxmfg_with = on;
+                        if on {
+                            self.ada_mfg = false;
+                        }
+                    }
+                }
+                ui.add_space(6.0);
                 }
                 // The engine card's own border ended flush against this
                 // heading, which read as the two touching (#77).
