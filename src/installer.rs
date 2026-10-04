@@ -7,6 +7,8 @@
 //!    + smart-merged conf (force OutputAPI, floor VRAM, preserve the rest).
 //! 1. ReShade add-on build — https://reshade.me links `/downloads/ReShade_Setup_<ver>_Addon.exe`;
 //!    that exe has an appended ZIP with ReShade64.dll / ReShade32.dll. Dropped as dxgi.dll.
+//!    The front page answers HTTP 500/503 while `/downloads/` still serves the file, so the
+//!    version then comes from the newest stable tag on github.com/crosire/reshade.
 //! 2. ReShade shader headers — raw.githubusercontent.com/crosire/reshade-shaders/slim/Shaders/
 //!    {ReShade.fxh, ReShadeUI.fxh, DrawText.fxh}; the setup exe only carries the DLLs.
 //! 3. DLSS5-Feeder — jlrouzies-fr/DLSS5-Feeder latest release zip only
@@ -33,6 +35,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const RESHADE_HOME: &str = "https://reshade.me";
+pub const RESHADE_REPO: &str = "crosire/reshade";
 pub const RESHADE_SHADERS_RAW: &str =
     "https://raw.githubusercontent.com/crosire/reshade-shaders/slim/Shaders/";
 pub const FEEDER_REPO: &str = "jlrouzies-fr/DLSS5-Feeder";
@@ -1920,13 +1923,146 @@ pub fn nvidia_dll(client: &Client, name: &str) -> Option<(String, String)> {
 
 // ── step 1: ReShade ────────────────────────────────────────────────
 
+pub fn reshade_addon_url(ver: &str) -> String {
+    format!("{RESHADE_HOME}/downloads/ReShade_Setup_{ver}_Addon.exe")
+}
+
+/// `(version, download URL)` of the add-on setup exe.
+///
+/// The homepage is the advertised link. When it is down or no longer names the
+/// file, the version is the newest stable `crosire/reshade` tag whose installer
+/// is published at the same `/downloads/` path.
 pub fn resolve_reshade_setup(client: &Client) -> Result<(String, String)> {
-    let html = net::get_text(client, RESHADE_HOME)?;
-    let re = Regex::new(r"/downloads/ReShade_Setup_([\d.]+)_Addon\.exe").unwrap();
-    let m = re
-        .captures(&html)
-        .ok_or_else(|| anyhow!("ReShade add-on installer link not found on reshade.me"))?;
-    Ok((m[1].to_owned(), format!("{RESHADE_HOME}{}", &m[0])))
+    if let Ok(html) = net::get_text(client, RESHADE_HOME) {
+        if let Some(found) = reshade_setup_from_html(&html) {
+            return Ok(found);
+        }
+    }
+    let ver = published_reshade_version(client)?;
+    let url = reshade_addon_url(&ver);
+    Ok((ver, url))
+}
+
+fn reshade_setup_from_html(html: &str) -> Option<(String, String)> {
+    let re = Regex::new(r"ReShade_Setup_(\d+(?:\.\d+)+)_Addon\.exe").unwrap();
+    let ver = re.captures(html)?.get(1)?.as_str().to_owned();
+    let url = reshade_addon_url(&ver);
+    Some((ver, url))
+}
+
+/// Stable `X.Y` / `X.Y.Z` versions, newest first. A `v` prefix is stripped.
+/// `6.8.0-rc1` is not stable.
+fn stable_reshade_versions<I, S>(tags: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut out: Vec<(Vec<u64>, String)> = tags
+        .into_iter()
+        .filter_map(|t| {
+            let raw = t.as_ref().trim();
+            let ver = raw.strip_prefix('v').unwrap_or(raw);
+            if ver.is_empty()
+                || ver.starts_with('.')
+                || ver.ends_with('.')
+                || ver.contains("..")
+                || !ver.chars().all(|c| c.is_ascii_digit() || c == '.')
+            {
+                return None;
+            }
+            let parts: Vec<u64> = ver
+                .split('.')
+                .map(|p| p.parse().ok())
+                .collect::<Option<_>>()?;
+            if parts.len() < 2 {
+                return None;
+            }
+            Some((parts, ver.to_owned()))
+        })
+        .collect();
+    out.sort_by(|a, b| b.0.cmp(&a.0));
+    out.dedup_by(|a, b| a.1 == b.1);
+    out.into_iter().map(|(_, v)| v).collect()
+}
+
+fn reshade_versions_in_html(html: &str) -> Vec<String> {
+    let re = Regex::new(&format!(
+        r"/{}/releases/tag/v(\d+(?:\.\d+)+)",
+        regex::escape(RESHADE_REPO)
+    ))
+    .unwrap();
+    re.captures_iter(html)
+        .filter_map(|c| {
+            let m = c.get(1)?;
+            // `v6.8.0-rc1` shares the numeric prefix; the '-' keeps it out.
+            let after = html[m.end()..].chars().next();
+            if after.is_some_and(|ch| ch == '-' || ch.is_ascii_alphanumeric()) {
+                return None;
+            }
+            Some(m.as_str().to_owned())
+        })
+        .collect()
+}
+
+fn reshade_tag_names(v: &Value) -> Vec<String> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(str::to_owned))
+        .collect()
+}
+
+fn reshade_version_candidates(client: &Client) -> Result<Vec<String>> {
+    let mut why = Vec::new();
+    match net::get_text(client, &format!("https://github.com/{RESHADE_REPO}/tags")) {
+        Ok(html) => {
+            let v = stable_reshade_versions(reshade_versions_in_html(&html));
+            if !v.is_empty() {
+                return Ok(v);
+            }
+            why.push("tags page listed no stable version".to_owned());
+        }
+        Err(e) => why.push(format!("{e:#}")),
+    }
+    match net::get_json_github(
+        client,
+        &format!("https://api.github.com/repos/{RESHADE_REPO}/tags?per_page=30"),
+    ) {
+        Ok(json) => {
+            let v = stable_reshade_versions(reshade_tag_names(&json));
+            if !v.is_empty() {
+                return Ok(v);
+            }
+            why.push("tags API listed no stable version".to_owned());
+        }
+        Err(e) => why.push(format!("{e:#}")),
+    }
+    bail!(
+        "could not read a ReShade version from github.com/{RESHADE_REPO} ({})",
+        why.join("; ")
+    )
+}
+
+fn is_http_404(err: &anyhow::Error) -> bool {
+    format!("{err:#}").contains("HTTP 404")
+}
+
+/// Newest candidate whose setup exe answers. A missing file (404) is skipped.
+/// Any other lookup error keeps that version: the download uses GET, and a
+/// HEAD failure is not proof the file is absent.
+fn published_reshade_version(client: &Client) -> Result<String> {
+    let versions = reshade_version_candidates(client)?;
+    let mut missing = None;
+    for ver in versions.iter().take(5) {
+        match net::remote_len(client, &reshade_addon_url(ver)) {
+            Ok(_) => return Ok(ver.clone()),
+            Err(e) if is_http_404(&e) => missing = Some(e),
+            Err(_) => return Ok(ver.clone()),
+        }
+    }
+    Err(missing.unwrap_or_else(|| anyhow!("no stable ReShade version"))).context(
+        "ReShade add-on installer was not listed on reshade.me, and no published build was found from github.com/crosire/reshade",
+    )
 }
 
 pub fn install_reshade_from_setup(
@@ -4750,6 +4886,50 @@ mod tests {
             .map(|s| s.name)
             .collect();
         assert_eq!(names[0], "dgVoodoo 2.87.5 (DX9 → D3D11)");
+    }
+
+    #[test]
+    fn reshade_version_is_read_from_the_homepage_link() {
+        let html = r#"<a href="/downloads/ReShade_Setup_6.8.0_Addon.exe">download</a>"#;
+        let (ver, url) = reshade_setup_from_html(html).unwrap();
+        assert_eq!(ver, "6.8.0");
+        assert_eq!(
+            url,
+            "https://reshade.me/downloads/ReShade_Setup_6.8.0_Addon.exe"
+        );
+        assert!(reshade_setup_from_html("<html>no installer here</html>").is_none());
+    }
+
+    /// The homepage is down (HTTP 500). The version is still the newest stable
+    /// tag, and a release candidate sharing that number does not win.
+    #[test]
+    fn reshade_version_falls_back_to_the_newest_stable_tag() {
+        let html = r#"
+            <a href="/crosire/reshade/releases/tag/v6.8.0">
+            <a href="/crosire/reshade/releases/tag/v6.7.3">
+            <a href="/crosire/reshade/releases/tag/v6.10.0-rc1">
+            <a href="/crosire/reshade/releases/tag/v6.9.0">
+        "#;
+        let vers = stable_reshade_versions(reshade_versions_in_html(html));
+        assert_eq!(vers.first().map(String::as_str), Some("6.9.0"));
+        assert!(!vers.iter().any(|v| v.contains("rc")));
+        let api = json!([
+            {"name": "v6.8.0"},
+            {"name": "v6.9.1-beta"},
+            {"name": "v6.7.3"}
+        ]);
+        assert_eq!(stable_reshade_versions(reshade_tag_names(&api))[0], "6.8.0");
+    }
+
+    /// reshade.me's front page returns HTTP 500 while the installer URL still
+    /// works. This is the request Install makes.
+    #[test]
+    fn reshade_setup_resolves_while_the_homepage_is_down() {
+        let client = net::client().expect("client");
+        let (ver, url) = resolve_reshade_setup(&client).unwrap();
+        assert_eq!(url, reshade_addon_url(&ver));
+        let len = net::remote_len(&client, &url).unwrap().unwrap_or(0);
+        assert!(len > 100_000, "{url} was {len} bytes");
     }
 
     #[test]
