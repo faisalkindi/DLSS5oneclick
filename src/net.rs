@@ -288,6 +288,13 @@ pub fn cache_dir() -> std::path::PathBuf {
         .join("downloads")
 }
 
+/// The file name a URL's download is kept under in the cache directory.
+pub fn cache_file_name(url: &str) -> Option<String> {
+    cache_path(url)?
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+}
+
 /// The cache file for a URL, or `None` for a URL whose contents can change
 /// under the same address -- `/releases/latest/download/...` is a moving
 /// target, and caching it would pin everybody to whatever shipped first.

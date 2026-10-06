@@ -1163,11 +1163,17 @@ fn step_host_reshade(
     let host = st.consumer_dir();
     fs::create_dir_all(&host)?;
     progress(0, "Looking up latest ReShade");
-    let (ver, url) = resolve_reshade_setup(client)?;
+    let (ver, url, live) = resolve_reshade_setup_or_cached(client)?;
     if st.host_reshade {
         match fs::read_to_string(host.join(game::RESHADE_MARKER)) {
             Ok(mine) if mine.trim() == ver => {
                 return Ok(vec![format!("host64/dxgi.dll already current ({ver})")]);
+            }
+            Ok(_) if !live => {
+                return Ok(vec![
+                    "host64/dxgi.dll present (reshade.me could not be reached, so not refreshed)"
+                        .into(),
+                ]);
             }
             Ok(_) => progress(0, &format!("host64 ReShade {ver} is out, refreshing")),
             Err(_) => {
@@ -1211,7 +1217,7 @@ fn step_reshade_via_opti(
     let dll = d.join(RESHADE64);
     if !dll.is_file() {
         progress(0, "Looking up latest ReShade");
-        let (ver, url) = resolve_reshade_setup(client)?;
+        let (ver, url, _) = resolve_reshade_setup_or_cached(client)?;
         let setup = work.join(format!("ReShade_Setup_{ver}_Addon.exe"));
         net::download(client, &url, &setup, "ReShade", progress)?;
         install_reshade_from_setup(&setup, d, st.bitness, RESHADE64)?;
@@ -1920,6 +1926,67 @@ pub fn nvidia_dll(client: &Client, name: &str) -> Option<(String, String)> {
 
 // ── step 1: ReShade ────────────────────────────────────────────────
 
+/// The ReShade installer reshade.me offered last, for when the site cannot be
+/// asked: its page answered HTTP 500 for about a day in October 2026 and every
+/// install and update failed with it (#125), though the files were fine.
+const RESHADE_LAST_KNOWN: &str = "6.8.0";
+
+fn reshade_setup_url(ver: &str) -> String {
+    format!("{RESHADE_HOME}/downloads/ReShade_Setup_{ver}_Addon.exe")
+}
+
+fn version_key(v: &str) -> Vec<u32> {
+    v.split('.').map(|p| p.parse().unwrap_or(0)).collect()
+}
+
+/// The newest ReShade installer already in the download cache `dir`.
+fn newest_cached_reshade_in(dir: &Path) -> Option<(String, String)> {
+    let re = Regex::new(r"^[0-9a-f]{16}-ReShade_Setup_([\d.]+)_Addon\.exe$").unwrap();
+    let mut best: Option<String> = None;
+    for e in fs::read_dir(dir).ok()?.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(c) = re.captures(&name) else {
+            continue;
+        };
+        let ver = c[1].to_owned();
+        // The hash in the name belongs to this exact URL; one that does not
+        // match is not something `net::download` would find.
+        if net::cache_file_name(&reshade_setup_url(&ver)).as_deref() != Some(name.as_str()) {
+            continue;
+        }
+        if best
+            .as_deref()
+            .is_none_or(|b| version_key(&ver) > version_key(b))
+        {
+            best = Some(ver);
+        }
+    }
+    best.map(|v| {
+        let url = reshade_setup_url(&v);
+        (v, url)
+    })
+}
+
+/// `resolve_reshade_setup`, and when reshade.me cannot be asked, the newest
+/// installer already downloaded, else the last known one. The flag says whether
+/// the answer is what reshade.me offers right now: when it is not, a ReShade
+/// already in a game is left alone instead of being "refreshed" to an older
+/// build.
+pub fn resolve_reshade_setup_or_cached(client: &Client) -> Result<(String, String, bool)> {
+    match resolve_reshade_setup(client) {
+        Ok((v, u)) => Ok((v, u, true)),
+        Err(_) => {
+            let (v, u) = newest_cached_reshade_in(&net::cache_dir()).unwrap_or_else(|| {
+                (
+                    RESHADE_LAST_KNOWN.to_owned(),
+                    reshade_setup_url(RESHADE_LAST_KNOWN),
+                )
+            });
+            Ok((v, u, false))
+        }
+    }
+}
+
 pub fn resolve_reshade_setup(client: &Client) -> Result<(String, String)> {
     let html = net::get_text(client, RESHADE_HOME)?;
     let re = Regex::new(r"/downloads/ReShade_Setup_([\d.]+)_Addon\.exe").unwrap();
@@ -2225,12 +2292,18 @@ fn step_reshade(
     // does nothing. Whatever the marker says, that one gets replaced (#69).
     let wrong_bitness = st.reshade && game::exe_bitness(&proxy).is_ok_and(|b| b != st.bitness);
     progress(0, "Looking up latest ReShade");
-    let (ver, url) = resolve_reshade_setup(client)?;
+    let (ver, url, live) = resolve_reshade_setup_or_cached(client)?;
     if st.reshade && !wrong_bitness {
         // Only a copy this tool placed is refreshed; a user's own ReShade stays.
         match fs::read_to_string(d.join(game::RESHADE_MARKER)) {
             Ok(mine) if mine.trim() == ver => {
                 return Ok(vec![format!("ReShade already current ({ver})")]);
+            }
+            Ok(_) if !live => {
+                return Ok(vec![
+                    "ReShade present (reshade.me could not be reached, so not refreshed)"
+                        .to_owned(),
+                ]);
             }
             Ok(_) => progress(0, &format!("ReShade {ver} is out, refreshing")),
             Err(_) => {
@@ -5545,6 +5618,31 @@ RestoreComputeSignature=true
         assert_eq!(
             game::rtxmfg_marker(d),
             Some(("version.dll".to_owned(), false))
+        );
+    }
+
+    /// reshade.me's page answered HTTP 500 for a day (#125); an install can
+    /// still run from the installer an earlier one downloaded.
+    #[test]
+    fn the_newest_cached_reshade_installer_is_found() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path();
+        assert_eq!(newest_cached_reshade_in(d), None);
+        for v in ["6.7.3", "6.10.0", "6.8.0"] {
+            let name = net::cache_file_name(&reshade_setup_url(v)).unwrap();
+            fs::write(d.join(name), b"x").unwrap();
+        }
+        // A file that merely looks right, with another URL's hash, is ignored.
+        fs::write(
+            d.join("0000000000000000-ReShade_Setup_9.9.9_Addon.exe"),
+            b"x",
+        )
+        .unwrap();
+        let (v, url) = newest_cached_reshade_in(d).unwrap();
+        assert_eq!(v, "6.10.0");
+        assert_eq!(
+            url,
+            "https://reshade.me/downloads/ReShade_Setup_6.10.0_Addon.exe"
         );
     }
 
