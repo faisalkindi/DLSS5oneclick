@@ -114,6 +114,56 @@ pub fn steam_library_roots(vdf: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Which app ids libraryfolders.vdf lists under each library root. A game moved
+/// between drives can leave its old `appmanifest` behind; the library Steam
+/// lists the app under is the one it uses.
+pub fn steam_library_apps(vdf: &str) -> Vec<(PathBuf, Vec<u64>)> {
+    let path_re = Regex::new(r#""path"\s+"([^"]+)""#).unwrap();
+    let app_re = Regex::new(r#""(\d+)"\s+"\d+""#).unwrap();
+    let marks: Vec<(usize, usize, PathBuf)> = path_re
+        .captures_iter(vdf)
+        .map(|c| {
+            let m = c.get(0).unwrap();
+            (
+                m.start(),
+                m.end(),
+                PathBuf::from(c[1].replace("\\\\", "\\")),
+            )
+        })
+        .collect();
+    let mut out = Vec::new();
+    for (i, (_, end, root)) in marks.iter().enumerate() {
+        let stop = marks.get(i + 1).map_or(vdf.len(), |m| m.0);
+        let seg = &vdf[*end..stop];
+        let ids = seg
+            .find("\"apps\"")
+            .map(|at| {
+                app_re
+                    .captures_iter(&seg[at..])
+                    .filter_map(|c| c[1].parse().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.push((root.clone(), ids));
+    }
+    out
+}
+
+/// Of several copies of one Steam game, the one to show: the copy in the
+/// library Steam lists the app under, else the one updated last.
+/// `listed[i]` says copy `i` sits in such a library; `updated[i]` is its
+/// `LastUpdated`.
+pub fn choose_steam_copy(listed: &[bool], updated: &[u64]) -> usize {
+    if let Some(i) = listed.iter().position(|&l| l) {
+        return i;
+    }
+    updated
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, u)| **u)
+        .map_or(0, |(i, _)| i)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct Acf {
     pub appid: u64,
@@ -181,6 +231,11 @@ fn scan_steam(out: &mut Vec<Game>) {
     if !roots.iter().any(|r| r == &steam) {
         roots.push(steam.clone());
     }
+    let listed = steam_library_apps(&vdf);
+    let norm = |p: &Path| p.to_string_lossy().to_ascii_lowercase();
+    // (app id, copy listed by Steam, LastUpdated, the game) for every copy.
+    let mut copies: Vec<(u64, bool, u64, Game)> = Vec::new();
+    let updated_re = Regex::new(r#""LastUpdated"\s+"(\d+)""#).unwrap();
     for root in roots {
         let sa = root.join("steamapps");
         let Ok(rd) = fs::read_dir(&sa) else { continue };
@@ -202,15 +257,43 @@ fn scan_steam(out: &mut Vec<Game>) {
             if !dir.is_dir() {
                 continue;
             }
-            out.push(Game {
-                title: a.name.clone(),
-                store: Store::Steam,
-                installed: created(&dir),
-                poster: steam_poster(&steam, a.appid),
-                exe_hint: None,
-                dir,
-            });
+            let is_listed = listed
+                .iter()
+                .any(|(r, ids)| norm(r) == norm(&root) && ids.contains(&a.appid));
+            let updated = fs::read_to_string(e.path())
+                .ok()
+                .and_then(|t| updated_re.captures(&t).and_then(|c| c[1].parse().ok()))
+                .unwrap_or(0);
+            copies.push((
+                a.appid,
+                is_listed,
+                updated,
+                Game {
+                    title: a.name.clone(),
+                    store: Store::Steam,
+                    installed: created(&dir),
+                    poster: steam_poster(&steam, a.appid),
+                    exe_hint: None,
+                    dir,
+                },
+            ));
         }
+    }
+    // A game left in two libraries (moved between drives, old manifest kept)
+    // is one game: show the copy Steam uses.
+    let mut seen: Vec<u64> = Vec::new();
+    for i in 0..copies.len() {
+        let id = copies[i].0;
+        if seen.contains(&id) {
+            continue;
+        }
+        seen.push(id);
+        let same: Vec<usize> = (0..copies.len()).filter(|&j| copies[j].0 == id).collect();
+        let pick = choose_steam_copy(
+            &same.iter().map(|&j| copies[j].1).collect::<Vec<_>>(),
+            &same.iter().map(|&j| copies[j].2).collect::<Vec<_>>(),
+        );
+        out.push(copies[same[pick]].3.clone());
     }
 }
 
@@ -961,6 +1044,47 @@ mod tests {
         );
         assert_eq!(c.title, None);
         assert_eq!(c.logo.as_deref(), Some("s.png"));
+    }
+
+    /// A game left in two libraries is shown once, from the library Steam
+    /// lists the app under (else the copy updated last).
+    #[test]
+    fn a_game_in_two_steam_libraries_shows_the_copy_steam_uses() {
+        let vdf = r#""libraryfolders"
+{
+	"0"
+	{
+		"path"		"C:\Steam"
+		"apps"
+		{
+			"10"		"100"
+		}
+	}
+	"1"
+	{
+		"path"		"F:\SteamLibrary"
+		"apps"
+		{
+			"1263240"		"11819991095"
+			"20"		"5"
+		}
+	}
+	"2"
+	{
+		"path"		"H:\SteamLibrary"
+		"label"		""
+	}
+}"#;
+        let apps = steam_library_apps(vdf);
+        assert_eq!(apps.len(), 3);
+        assert_eq!(apps[1].0, PathBuf::from(r"F:\SteamLibrary"));
+        assert_eq!(apps[1].1, vec![1263240, 20]);
+        assert!(apps[2].1.is_empty());
+        // Copy 0 sits in a library that lists the app: it wins even if older.
+        assert_eq!(choose_steam_copy(&[false, true], &[900, 100]), 1);
+        // Neither listed: the most recently updated copy.
+        assert_eq!(choose_steam_copy(&[false, false], &[100, 900]), 1);
+        assert_eq!(choose_steam_copy(&[true], &[0]), 0);
     }
 
     #[test]
