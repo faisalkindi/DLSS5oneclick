@@ -475,7 +475,9 @@ impl App {
             self.advanced = true;
             self.upstream_on = st.upstream;
             self.consumer = installer::Consumer::Dlss5;
-            self.engine = if st.rtxmfg {
+            self.engine = if st.mfg_only {
+                Engine::MfgAddon
+            } else if st.rtxmfg {
                 Engine::Mfg
             } else if st.opti {
                 Engine::Opti
@@ -691,7 +693,7 @@ impl App {
         } else {
             std::env::remove_var(installer::RENODX_STABLE_ENV);
         }
-        if self.rtxmfg_with && engine != Engine::Mfg {
+        if self.rtxmfg_with && !matches!(engine, Engine::Mfg | Engine::MfgAddon) {
             std::env::set_var(installer::RTXMFG_WITH_ENV, "1");
             // Two multi-frame-generation unlocks in one game fight each other.
             self.ada_mfg = false;
@@ -782,7 +784,9 @@ impl App {
                     },
                 )
                 .map(|_| {
-                    if engine == Engine::Mfg {
+                    if engine == Engine::MfgAddon {
+                        "Done. In game: turn on the game's own DLSS Frame Generation; Home opens ReShade \u{2192} Add-ons tab \u{2192} the MFG unlock.".to_owned()
+                    } else if engine == Engine::Mfg {
                         "Done. In game: turn on the game's own DLSS Frame Generation; Backspace opens the RTXMFG menu.".to_owned()
                     } else if engine == Engine::Opti {
                         "Done. In game: Insert opens the OptiScaler overlay → enable Neural Rendering.".to_owned()
@@ -960,7 +964,9 @@ impl App {
                 self.page = Page::Setup;
                 return false;
             }
-            self.engine = if st.rtxmfg {
+            self.engine = if st.mfg_only {
+                Engine::MfgAddon
+            } else if st.rtxmfg {
                 Engine::Mfg
             } else if st.opti {
                 Engine::Opti
@@ -1268,6 +1274,13 @@ const TILE_AIO: Tile = Tile {
     optional: false,
 };
 
+const TILE_MFG_ADDON: Tile = Tile {
+    title: "RTX 40 MFG add-on",
+    detail: "renodx-mfgunlock.addon64 (mavismmg) \u{00b7} ReShade \u{00b7} no DLSS 5",
+    ok: |s| s.mfg,
+    optional: false,
+};
+
 const TILE_RTXMFG: Tile = Tile {
     title: "Universal RTXMFG \u{00b7} experimental",
     detail: "RTXMFG.dll (dashdogy) under the game's proxy name \u{00b7} no ReShade, no DLSS 5",
@@ -1413,6 +1426,9 @@ fn base_tiles(
 ) -> Vec<&'static Tile> {
     if engine == Engine::Mfg || st.is_some_and(|s| s.rtxmfg) {
         return vec![&TILE_RTXMFG];
+    }
+    if engine == Engine::MfgAddon || st.is_some_and(|s| s.mfg_only) {
+        return vec![&TILE_MFG_ADDON];
     }
     if engine == Engine::Aio || st.is_some_and(|s| s.aio && !s.opti) {
         return vec![&TILES_NATIVE[1], &TILE_AIO, &TILE_AIO_RUNTIME];
@@ -3607,6 +3623,14 @@ impl eframe::App for App {
                     if !mfg_ok && self.engine == Engine::Mfg {
                         self.engine = Engine::ReShade;
                     }
+                    // ReShade and the RTX 40 MFG add-on alone: 64-bit games
+                    // ReShade can reach.
+                    let addon_ok = ok_status
+                        .as_ref()
+                        .is_some_and(|s| !s.is32() && s.reshade_engine_problem().is_none());
+                    if !addon_ok && self.engine == Engine::MfgAddon {
+                        self.engine = Engine::ReShade;
+                    }
                     ui.add_space(6.0);
                     {
                         let mut only = self.engine == Engine::Mfg;
@@ -3629,11 +3653,25 @@ impl eframe::App for App {
                             );
                         }
                     }
+                    {
+                        let mut only = self.engine == Engine::MfgAddon;
+                        let cb = egui::Checkbox::new(
+                            &mut only,
+                            RichText::new(
+                                "RTX 40 multi-frame generation add-on only (mavismmg): ReShade and that add-on, no DLSS 5. The game must have DLSS Frame Generation of its own",
+                            )
+                            .font(t::plex(11.5))
+                            .color(t::TEXT_SOFT),
+                        );
+                        if ui.add_enabled(addon_ok && !self.running, cb).changed() {
+                            self.engine = if only { Engine::MfgAddon } else { Engine::ReShade };
+                        }
+                    }
                     // The same DLL beside DLSS 5, under a name of its own, for
                     // games where the OptiScaler build's built-in unlock does not
                     // take. The two unlocks cannot share a game, so the build's own
                     // tick is greyed out while this one is on.
-                    if mfg_ok && self.engine != Engine::Mfg {
+                    if mfg_ok && !matches!(self.engine, Engine::Mfg | Engine::MfgAddon) {
                         let mut on = self.rtxmfg_with;
                         let cb = egui::Checkbox::new(
                             &mut on,

@@ -289,6 +289,9 @@ pub enum Engine {
     /// generation for a game that has Streamline frame generation, with no
     /// ReShade and no DLSS 5.
     Mfg,
+    /// ReShade and the RTX 40 MFG add-on (`renodx-mfgunlock.addon64`) alone:
+    /// multi-frame generation with no DLSS 5.
+    MfgAddon,
 }
 
 const RTXMFG_REPO: &str = "dashdogy/RTX40MFG-Unlock";
@@ -415,6 +418,13 @@ pub fn missing_install_files(st: &GameStatus) -> Vec<String> {
     let mut missing = Vec::new();
     // RTXMFG alone is the one proxy DLL, which `rtxmfg` already says is there.
     if st.rtxmfg {
+        return missing;
+    }
+    // ReShade and the one add-on.
+    if st.mfg_only {
+        if !st.reshade {
+            missing.push(format!("{} (ReShade)", game::RESHADE_PROXY));
+        }
         return missing;
     }
     if st.aio && !st.opti {
@@ -1430,6 +1440,9 @@ fn step_renodx(
 pub fn plan_with(st: &GameStatus, engine: Engine, with_renodx: bool, upstream: bool) -> Vec<Step> {
     if engine == Engine::Mfg {
         return vec![STEP_RTXMFG, STEP_GPU_PREF];
+    }
+    if engine == Engine::MfgAddon {
+        return vec![STEP_RESHADE, STEP_MFG, STEP_GPU_PREF];
     }
     let mut v = if engine == Engine::Aio {
         // The AIO is the whole consumer: ReShade to load it, the model and
@@ -3739,6 +3752,9 @@ pub fn run_all_with(
             "Universal RTXMFG and the OptiScaler build's own RTX 20/30/40 multi-frame generation unlock cannot run together; untick one of them."
         );
     }
+    if engine == Engine::MfgAddon && st.is32() {
+        bail!("The RTX 40 MFG add-on is 64-bit only.");
+    }
     if engine == Engine::Mfg {
         if st.is32() {
             bail!("Universal RTXMFG is 64-bit only.");
@@ -5644,6 +5660,28 @@ RestoreComputeSignature=true
             url,
             "https://reshade.me/downloads/ReShade_Setup_6.10.0_Addon.exe"
         );
+    }
+
+    /// ReShade and the RTX 40 MFG add-on alone: no neural consumer, and the
+    /// state is read back from what is in the folder.
+    #[test]
+    fn the_mfg_addon_route_is_reshade_and_the_addon_only() {
+        let st = game::stub_status(game::Mode::Native, game::Api::Dx12);
+        let names: Vec<&str> = plan_with(&st, Engine::MfgAddon, true, false)
+            .iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec![STEP_RESHADE.name, STEP_MFG.name, STEP_GPU_PREF.name]
+        );
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path();
+        let exe = make_pe(&d.join("game.exe"), game::PE_X64);
+        fs::write(d.join(game::MFG_ADDON), b"x").unwrap();
+        assert!(game::inspect(&exe).unwrap().mfg_only);
+        fs::write(d.join(game::DLSS5_ADDON), b"x").unwrap();
+        assert!(!game::inspect(&exe).unwrap().mfg_only);
     }
 
     #[test]

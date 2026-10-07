@@ -1156,6 +1156,9 @@ pub struct GameStatus {
     pub rtxmfg_with: bool,
     /// The RTX 40 multi-frame-generation add-on is already beside the game.
     pub mfg: bool,
+    /// ...and it is the only thing this tool put there besides ReShade: no
+    /// neural consumer, no Feeder, no RTXMFG (the "MFG add-on only" setup).
+    pub mfg_only: bool,
     /// Unreal-style layout / Shipping exe (heuristic).
     pub unreal_likely: bool,
     /// UnityPlayer.dll present (heuristic).
@@ -1208,6 +1211,7 @@ pub(crate) fn stub_status(mode: Mode, api: Api) -> GameStatus {
         rtxmfg: false,
         rtxmfg_with: false,
         mfg: false,
+        mfg_only: false,
         unreal_likely: false,
         unity_likely: false,
         rt_likely: false,
@@ -1369,6 +1373,10 @@ impl GameStatus {
         // Nothing else belongs to this setup: the one DLL is all of it.
         if self.rtxmfg {
             return true;
+        }
+        // ReShade and the one add-on.
+        if self.mfg_only {
+            return self.reshade;
         }
         match self.mode {
             Mode::Feeder => {
@@ -1570,6 +1578,20 @@ pub fn inspect(exe: &Path) -> Result<GameStatus> {
         rtxmfg: rtxmfg_marker(d).is_some_and(|(_, with)| !with),
         rtxmfg_with: rtxmfg_marker(d).is_some_and(|(_, with)| with),
         mfg: d.join(MFG_ADDON).is_file(),
+        mfg_only: d.join(MFG_ADDON).is_file()
+            && ![
+                FEEDER_ADDON,
+                FEEDER_ADDON32,
+                FEEDER_HELPER_ADDON,
+                DLSS5_ADDON,
+                SF_ADDON,
+                UPSTREAM_ADDON,
+                AIO_ADDON,
+                OPTI_MANIFEST,
+                RTXMFG_MARKER,
+            ]
+            .iter()
+            .any(|f| d.join(f).is_file()),
         gpu,
         exe: exe.to_path_buf(),
         bitness,
