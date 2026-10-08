@@ -1798,6 +1798,13 @@ pub fn find_game_exes(dir: &Path) -> Vec<PathBuf> {
 /// `Game\Binaries\Win64\*-Shipping.exe`), we still search the parent tree so
 /// Install lands next to the real game — not the launcher (Ghostrunner).
 pub fn resolve_target(input: &Path) -> Result<(PathBuf, Vec<PathBuf>)> {
+    resolve_target_with(input, &dir_writable)
+}
+
+fn resolve_target_with(
+    input: &Path,
+    writable: &dyn Fn(&Path) -> bool,
+) -> Result<(PathBuf, Vec<PathBuf>)> {
     if input.is_file() {
         // A named file is an instruction, not a hint: installing into a different
         // game than the one the user pointed at writes DLLs into the wrong folder.
@@ -1826,8 +1833,18 @@ pub fn resolve_target(input: &Path) -> Result<(PathBuf, Vec<PathBuf>)> {
             Some(first) => Ok((first.clone(), c)),
             None => {
                 // A Game Pass folder whose real exe is locked has nothing
-                // readable but the launch stub, which is skipped: say why.
+                // readable but the launch stub, which is skipped as a game.
                 if let Some(content) = game_pass_content_dir(input) {
+                    // But where the folder takes writes (Microsoft Flight
+                    // Simulator 2024 from the Store, whose DLSS 5 install from
+                    // before 0.14.11 loaded in game), the stub is still the exe
+                    // to install beside, as it was before the stub was skipped.
+                    for dir in [input, content.as_path()] {
+                        let stub = dir.join("gamelaunchhelper.exe");
+                        if stub.is_file() && writable(dir) {
+                            return Ok((stub.clone(), vec![stub]));
+                        }
+                    }
                     bail!("{}", game_pass_locked_message(&content));
                 }
                 bail!("no 64-bit game executable found in {}", input.display())
@@ -3097,8 +3114,12 @@ mod tests {
         fs::write(d.join("MicrosoftGame.config"), "<Game/>").unwrap();
         make_pe(&d.join("gamelaunchhelper.exe"), PE_X64);
         assert!(find_game_exes(&d).is_empty());
-        let err = resolve_target(&d).unwrap_err().to_string();
+        // A folder that refuses writes: nothing to install beside, and it says why.
+        let err = resolve_target_with(&d, &|_| false).unwrap_err().to_string();
         assert!(err.contains("Game Pass"), "{err}");
+        // A folder that takes writes (MSFS 2024 from the Store): the stub is the target.
+        let (exe, _) = resolve_target_with(&d, &|_| true).unwrap();
+        assert_eq!(exe, d.join("gamelaunchhelper.exe"));
         make_pe(&d.join("RealGame.exe"), PE_X64);
         assert_eq!(find_game_exes(&d).len(), 1);
     }
