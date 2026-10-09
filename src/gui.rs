@@ -69,6 +69,9 @@ pub struct App {
     /// Games waiting for "Update all": started one at a time, each when the
     /// previous install has finished.
     update_queue: Vec<usize>,
+    /// The log of each game's last run, so "Update all" does not leave every
+    /// game showing only the log of the last one updated.
+    game_logs: HashMap<PathBuf, Vec<LogLine>>,
     /// The card being installed from the Games page, so the progress is shown
     /// where the user started it instead of throwing them onto another page.
     updating: Option<usize>,
@@ -113,6 +116,9 @@ pub struct App {
     advanced: bool,
     /// OptiScaler route, RTX 40 only: the fork's built-in MFG unlock (#83).
     ada_mfg: bool,
+    /// The engine that was picked before an "only" MFG tick, put back when
+    /// it is unticked.
+    engine_before_mfg: Option<Engine>,
     /// Universal RTXMFG beside the DLSS 5 setup (not alone).
     rtxmfg_with: bool,
     /// OptiScaler route, D3D12, any RTX: FSR 3.1 frame generation (2X).
@@ -224,7 +230,16 @@ fn meta_from_status(st: &GameStatus, latest: &installer::Latest) -> GameMeta {
         unreal_likely: st.unreal_likely,
         unity_likely: st.unity_likely,
         re_engine: st.re_engine,
-        shaders_missing: game::shaders_missing(dir),
+        // Only where the tool put ReShade in for the Feeder, which needs the
+        // shaders; a game with its own DLSS runs the add-on with none (the
+        // Home tab saying "no effect files" is normal there), and RTXMFG,
+        // OptiScaler and the MFG add-on alone have no shaders to miss.
+        shaders_missing: st.mode == game::Mode::Feeder
+            && st.reshade
+            && !st.opti
+            && !st.mfg_only
+            && game::installed_by_tool(dir)
+            && game::shaders_missing(dir),
         wrong_folder: game::install_folder_mismatch(&st.exe),
         exe: st.exe.clone(),
     }
@@ -301,6 +316,8 @@ impl App {
             consumer: installer::Consumer::Dlss5,
             advanced: false,
             ada_mfg: false,
+            engine_before_mfg: None,
+            game_logs: HashMap::new(),
             rtxmfg_with: false,
             opti_fg: false,
             renodx: RenodxLookup::Idle,
@@ -1043,6 +1060,15 @@ impl App {
         self.exe_text = path.to_string_lossy().into_owned();
         self.refresh();
         self.page = Page::Setup;
+        // Show this game's own last log, not the last game's.
+        if !self.running {
+            self.log = self
+                .resolved_exe
+                .as_ref()
+                .and_then(|e| self.game_logs.get(e))
+                .cloned()
+                .unwrap_or_default();
+        }
     }
 
     /// Re-check at most this often while the window is open.
@@ -1185,6 +1211,10 @@ impl App {
                 }
             }
             self.refresh();
+            // Keep this game's log; the next game of "Update all" clears the pane.
+            if let Some(e) = self.resolved_exe.clone() {
+                self.game_logs.insert(e, self.log.clone());
+            }
         }
     }
 }
@@ -3643,7 +3673,12 @@ impl eframe::App for App {
                             .color(t::TEXT_SOFT),
                         );
                         if ui.add_enabled(mfg_ok && !self.running, cb).changed() {
-                            self.engine = if only { Engine::Mfg } else { Engine::ReShade };
+                            self.engine = if only {
+                                self.engine_before_mfg.get_or_insert(self.engine);
+                                Engine::Mfg
+                            } else {
+                                self.engine_before_mfg.take().unwrap_or(Engine::ReShade)
+                            };
                         }
                         if !mfg_ok {
                             ui.label(
@@ -3664,7 +3699,12 @@ impl eframe::App for App {
                             .color(t::TEXT_SOFT),
                         );
                         if ui.add_enabled(addon_ok && !self.running, cb).changed() {
-                            self.engine = if only { Engine::MfgAddon } else { Engine::ReShade };
+                            self.engine = if only {
+                                self.engine_before_mfg.get_or_insert(self.engine);
+                                Engine::MfgAddon
+                            } else {
+                                self.engine_before_mfg.take().unwrap_or(Engine::ReShade)
+                            };
                         }
                     }
                     // The same DLL beside DLSS 5, under a name of its own, for
@@ -4675,6 +4715,29 @@ mod tests {
     /// prefix-of-a-name false matches.
     /// The saved library state survives a write and a read, so the installed
     /// cards can be drawn before the first inspection finishes.
+    /// The card's "!" for missing shaders is for the Feeder's ReShade only: a
+    /// game with its own DLSS, or RTXMFG / OptiScaler as dxgi.dll, has none to miss.
+    #[test]
+    fn missing_shaders_only_warn_where_the_feeder_needs_them() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path();
+        std::fs::write(d.join(game::RESHADE_PROXY), b"x").unwrap();
+        std::fs::write(d.join(game::RESHADE_MARKER), b"6.8.0").unwrap();
+        let mut st = game::stub_status(game::Mode::Feeder, game::Api::Dx12);
+        st.exe = d.join("game.exe");
+        st.reshade = true;
+        let latest = installer::Latest::default();
+        assert!(meta_from_status(&st, &latest).shaders_missing);
+        st.mode = game::Mode::Native;
+        assert!(!meta_from_status(&st, &latest).shaders_missing);
+        st.mode = game::Mode::Feeder;
+        st.mfg_only = true;
+        assert!(!meta_from_status(&st, &latest).shaders_missing);
+        st.mfg_only = false;
+        st.reshade = false;
+        assert!(!meta_from_status(&st, &latest).shaders_missing);
+    }
+
     #[test]
     fn a_game_state_round_trips_through_the_library_cache() {
         let m = GameMeta {
