@@ -3694,14 +3694,19 @@ impl eframe::App for App {
                 if self.advanced {
                 // ── engine chooser ───────────────────────────────
                 let native = ok_status.as_ref().is_some_and(|s| s.mode == game::Mode::Native);
-                if !native && self.engine == Engine::Opti {
+                // A Radeon has no NGX: AMDNR's OptiScaler build is its only setup.
+                let amd = ok_status.as_ref().is_some_and(|s| s.amd());
+                if amd && native {
+                    self.engine = Engine::Opti;
+                } else if !native && self.engine == Engine::Opti {
                     self.engine = Engine::ReShade;
                 }
                 // The AIO is a 64-bit ReShade add-on: no 32-bit build is wired
                 // here, and ReShade cannot reach a Vulkan game from dxgi.dll.
                 let aio_ok = ok_status
                     .as_ref()
-                    .is_some_and(|s| !s.is32() && s.reshade_engine_problem().is_none());
+                    .is_some_and(|s| !s.is32() && s.reshade_engine_problem().is_none())
+                    && !amd;
                 if !aio_ok && self.engine == Engine::Aio {
                     self.engine = Engine::ReShade;
                 }
@@ -3833,8 +3838,21 @@ impl eframe::App for App {
                     let col_w = ((row_w - gap * (cols - 1.0)) / cols).floor();
                     let reshade_title = "ReShade + DLSS 5 add-on";
                     let reshade_lines = ["The default. Works in every supported game.", "In game: Home → Add-ons → DLSS 5 Neural Rendering."];
-                    let opti_title = "OptiScaler (built-in NR pass)";
-                    let opti_lines = ["Dagherbou's fork, no ReShade. Also swaps upscalers.", "In game: Insert → enable Neural Rendering."];
+                    let reshade_note = if amd {
+                        "Needs an NVIDIA RTX card."
+                    } else {
+                        ""
+                    };
+                    let opti_title = if amd {
+                        "AMDNR (OptiScaler, neural rendering on Radeon)"
+                    } else {
+                        "OptiScaler (built-in NR pass)"
+                    };
+                    let opti_lines = if amd {
+                        ["3zwr1's build, about 1 GB. RX 7000 / 9000, a game with its own DLSS.", "In game: Insert opens the AMDNR menu, Home switches it on and off."]
+                    } else {
+                        ["Dagherbou's fork, no ReShade. Also swaps upscalers.", "In game: Insert → enable Neural Rendering."]
+                    };
                     let opti_note = if native {
                         ""
                     } else {
@@ -3853,7 +3871,7 @@ impl eframe::App for App {
                         "Needs a game ReShade can reach from dxgi.dll."
                     };
                     let aio_h = engine_card_height(ui, col_w, aio_title, &aio_lines, aio_note);
-                    let mut card_h = engine_card_height(ui, col_w, reshade_title, &reshade_lines, "")
+                    let mut card_h = engine_card_height(ui, col_w, reshade_title, &reshade_lines, reshade_note)
                         .max(engine_card_height(ui, col_w, opti_title, &opti_lines, opti_note));
                     if three_up {
                         card_h = card_h.max(aio_h);
@@ -3869,10 +3887,10 @@ impl eframe::App for App {
                         ui,
                         left,
                         self.engine == Engine::ReShade,
-                        true,
+                        !amd,
                         reshade_title,
                         &reshade_lines,
-                        "",
+                        reshade_note,
                     ) {
                         self.engine = Engine::ReShade;
                     }
@@ -3912,7 +3930,16 @@ impl eframe::App for App {
                         self.engine = Engine::Aio;
                     }
                 }
-                if self.engine == Engine::Opti {
+                if self.engine == Engine::Opti && amd {
+                    ui.add_space(14.0);
+                    ui.label(
+                        RichText::new(
+                            "AMDNR carries its own network, so there is no NVIDIA model to fetch. Neural Rendering is on from the first start; it is heavy on a Radeon, so expect a large frame cost. Easy Anti-Cheat games need EOS_USE_ANTICHEATCLIENTNULL=1 as a Windows user variable first.",
+                        )
+                        .font(t::plex(11.0))
+                        .color(t::TEXT_DIM),
+                    );
+                } else if self.engine == Engine::Opti {
                     ui.add_space(14.0);
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 8.0;

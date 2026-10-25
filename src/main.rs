@@ -679,7 +679,12 @@ Attach that zip to the GitHub issue.",
         &step,
     ) {
         Ok(_) => {
-            if engine == installer::Engine::Opti {
+            if engine == installer::Engine::Opti && installer::amdnr() {
+                println!(
+                    "
+Done. In game: turn the game's own upscaling on (DLSS, FSR or XeSS); Neural Rendering is on by default, Insert opens the AMDNR menu and Home switches it on and off."
+                );
+            } else if engine == installer::Engine::Opti {
                 println!(
                     "
 Done. In game: Insert opens the OptiScaler overlay -> enable Neural Rendering (off by default)."

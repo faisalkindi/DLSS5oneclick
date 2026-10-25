@@ -92,6 +92,16 @@ fn profile(st: &GameStatus) -> Option<(&'static [Setup], &'static str)> {
 /// Every setup worth trying in this game, best first. Empty when nothing this
 /// tool offers fits (a Vulkan game without DLSS of its own).
 pub fn ladder(st: &GameStatus) -> Vec<Setup> {
+    // A Radeon has no NGX, so the ReShade routes (which hand the network to
+    // NVIDIA's driver) cannot run; AMDNR's OptiScaler build is the only way,
+    // and it reads the inputs a game hands to DLSS.
+    if st.amd() {
+        return if st.mode == Mode::Native && !st.is32() {
+            vec![OPTI]
+        } else {
+            vec![]
+        };
+    }
     if let Some((l, _)) = profile(st) {
         let mut l = l.to_vec();
         // A game already on ReShade (ours or the user's) cannot start on
@@ -336,6 +346,24 @@ mod tests {
         let mut st = stub_status(Mode::Native, Api::Dx12);
         st.exe = dir.join("game.exe");
         st
+    }
+
+    /// A Radeon has no NGX: the only setup is AMDNR's OptiScaler build, and only
+    /// in a 64-bit game with DLSS of its own for it to read.
+    #[test]
+    fn a_radeon_gets_the_optiscaler_build_or_nothing() {
+        let t = tempfile::tempdir().unwrap();
+        let mut st = native(t.path());
+        st.gpu = Some((
+            crate::gpu::Gpu {
+                name: "AMD Radeon RX 9070 XT".into(),
+                vendor: "Advanced Micro Devices, Inc.".into(),
+            },
+            crate::gpu::Tier::Amd,
+        ));
+        assert_eq!(ladder(&st), vec![OPTI]);
+        st.mode = Mode::Feeder;
+        assert!(ladder(&st).is_empty());
     }
 
     #[test]

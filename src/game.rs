@@ -1386,6 +1386,11 @@ impl GameStatus {
     pub fn needs_bridge(&self) -> bool {
         self.dx11_native() && !self.dlss5_own_bridge()
     }
+    /// The best GPU is a Radeon RX 7000 / 9000. AMDNR's build carries its own
+    /// network there, so NVIDIA's model DLL is not part of a finished setup.
+    pub fn amd(&self) -> bool {
+        self.gpu.as_ref().is_some_and(|(_, t)| *t == gpu::Tier::Amd)
+    }
     pub fn complete(&self) -> bool {
         // The AIO is its own consumer on either kind of game: ReShade, the
         // add-on, the model, and NVIDIA's DLSS runtime beside it.
@@ -1416,7 +1421,7 @@ impl GameStatus {
                 // ShortFuse's, or the experimental Neural Upstream one. Only
                 // the DLSS 5 add-on needs the bridge in a DX11 game; ShortFuse's
                 // hooks D3D11's NGX calls itself.
-                (self.opti && self.dlssnr)
+                (self.opti && (self.dlssnr || self.amd()))
                     || (self.reshade && self.sf && self.dlssnr)
                     || (self.reshade
                         && (self.dlss5_addon || self.upstream)

@@ -356,6 +356,8 @@ pub struct Latest {
     /// has to be carried separately from the stable build's.
     pub opti_presr: Option<String>,
     pub opti_unlocked: Option<String>,
+    /// AMDNR's own numbering (Alpha0.3.5.8).
+    pub amdnr: Option<String>,
     pub dlss: Option<String>,
     pub dlssnr: Option<String>,
     pub aio: Option<String>,
@@ -392,6 +394,9 @@ impl Latest {
             opti: net::latest_tag(client, OPTI_REPO).ok(),
             opti_presr: net::latest_tag(client, OPTI_PRESR_REPO).ok(),
             opti_unlocked: net::latest_tag(client, OPTI_UNLOCKED_REPO).ok(),
+            amdnr: amdnr()
+                .then(|| net::latest_tag(client, AMDNR_REPO).ok())
+                .flatten(),
             // Same source order as the install: NVIDIA's tag, else the mirror's.
             dlss: nvidia_dll(client, game::DLSS_DLL)
                 .map(|(t, _)| t)
@@ -473,7 +478,7 @@ pub fn missing_install_files(st: &GameStatus) -> Vec<String> {
         }
         game::Mode::Native => {
             if st.opti {
-                if !st.dlssnr {
+                if !st.dlssnr && !st.amd() {
                     missing.push(game::DLSSNR_DLL.into());
                 }
             } else {
@@ -563,6 +568,7 @@ pub fn stale_components(dir: &Path, latest: &Latest) -> Vec<String> {
         let want = match manifest_repo(&m) {
             Some(r) if r == OPTI_PRESR_REPO => &latest.opti_presr,
             Some(r) if r == OPTI_UNLOCKED_REPO => &latest.opti_unlocked,
+            Some(r) if r == AMDNR_REPO => &latest.amdnr,
             Some(_) => &latest.opti,
             None if manifest_tag(&m).is_some_and(|t| !t.ends_with("-dlssnr")) => &latest.opti_presr,
             None => &latest.opti,
@@ -705,6 +711,11 @@ fn step_opti(
     // decides; a release with a single zip matches the fallback either way.
     let want_mfg = ada_mfg() == "true";
     let by_name = |tag: &str| -> Result<String> {
+        // AMDNR's release carries five zips; only the main package is ours,
+        // and a looser pattern would take the Anywhere host or a runtime.
+        if amdnr() {
+            return net::github_asset_url_html(client, repo, tag, AMDNR_ASSET);
+        }
         let specific = if want_mfg {
             r#"[^"]+-mfg\.zip"#
         } else {
@@ -715,6 +726,7 @@ fn step_opti(
     };
     let asset: String = match latest.clone() {
         Some(tag) => by_name(&tag)?,
+        None if amdnr() => bail!("could not read {repo}'s newest release; try again in a minute"),
         None => match net::get_json_github(client, &opti_releases_url()) {
             Ok(releases) => releases
                 .as_array()
@@ -731,7 +743,15 @@ fn step_opti(
     };
     let asset = asset.as_str();
     let zip_path = work.join("optiscaler-dlssnr.zip");
-    net::download(client, asset, &zip_path, "OptiScaler DLSS-NR", progress)?;
+    let label = if amdnr() {
+        "AMDNR (about 1 GB)"
+    } else {
+        "OptiScaler DLSS-NR"
+    };
+    net::download(client, asset, &zip_path, label, progress)?;
+    if amdnr() {
+        verify_release_digest(client, repo, asset, &zip_path)?;
+    }
 
     // What the previous install of this tool put there, so files the new
     // package no longer ships can be taken away again. A leftover
@@ -778,8 +798,12 @@ fn step_opti(
         // wilsjo2's a dlssnr/design one and a tests/ folder. Documentation
         // belongs in a repository, not beside someone's game exe. Licence
         // texts are kept: they travel with the binaries.
+        // AMDNR's FSR4Fast folder holds four alternative FSR 4 DLLs, about 170 MB
+        // none of the default settings read; its checksum list describes the zip.
         if parts[0].eq_ignore_ascii_case("docs")
             || parts[0].eq_ignore_ascii_case("tests")
+            || parts[0].eq_ignore_ascii_case("FSR4Fast")
+            || (parts.len() == 1 && fname.eq_ignore_ascii_case("SHA256SUMS.txt"))
             || (fname.to_ascii_lowercase().ends_with(".md")
                 && !parts.iter().any(|p| p.eq_ignore_ascii_case("Licenses")))
             || (parts.len() == 1 && fname.eq_ignore_ascii_case("LICENSE"))
@@ -846,6 +870,41 @@ fn step_opti(
     Ok(installed)
 }
 
+/// Check a downloaded release zip against the SHA-256 GitHub records for the
+/// asset. A mismatch is a corrupt or swapped download and stops the install; a
+/// release the API cannot be asked about (rate limit, offline mirror) carries
+/// on, as every other download here does.
+fn verify_release_digest(client: &Client, repo: &str, asset_url: &str, zip: &Path) -> Result<()> {
+    let Some((tag, name)) = asset_url
+        .split("/releases/download/")
+        .nth(1)
+        .and_then(|r| r.split_once('/'))
+    else {
+        return Ok(());
+    };
+    let Ok(release) = net::get_json_github(
+        client,
+        &format!("https://api.github.com/repos/{repo}/releases/tags/{tag}"),
+    ) else {
+        return Ok(());
+    };
+    let want = release["assets"]
+        .as_array()
+        .and_then(|a| a.iter().find(|x| x["name"].as_str() == Some(name)))
+        .and_then(|x| x["digest"].as_str())
+        .and_then(|d| d.strip_prefix("sha256:"))
+        .map(str::to_ascii_lowercase);
+    let Some(want) = want else {
+        return Ok(());
+    };
+    let have = net::sha256_file(zip)?.to_ascii_lowercase();
+    if have != want {
+        let _ = fs::remove_file(zip);
+        bail!("the {name} download does not match the checksum GitHub lists for it; try again");
+    }
+    Ok(())
+}
+
 /// Apply this install's choices to `OptiScaler.ini`: neural rendering on, the
 /// model resolution, and the optional frame-generation switches.
 ///
@@ -857,13 +916,19 @@ fn patch_opti_ini(st: &GameStatus, d: &Path) -> Result<()> {
     let ini = d.join(OPTI_INI);
     if let Ok(text) = fs::read_to_string(&ini) {
         let mut cur = text;
-        if let Some(patched) = set_dlss_nr_enabled(&cur) {
+        // AMDNR ships its ini with Neural Rendering on and its own keys; the
+        // switches below are the NVIDIA forks' and would only add lines it
+        // never reads.
+        let nvidia_forks = !amdnr();
+        if let Some(patched) = set_dlss_nr_enabled(&cur).filter(|_| nvidia_forks) {
             cur = patched;
         }
         // The frame stays full size; only the model's own work is done small and
         // enlarged, and its cost falls with the square of this. The single
         // biggest performance lever on this route.
-        if let Some(patched) = set_ini_key(&cur, "DlssNr", "WorkingScale", &working_scale()) {
+        if let Some(patched) =
+            set_ini_key(&cur, "DlssNr", "WorkingScale", &working_scale()).filter(|_| nvidia_forks)
+        {
             cur = patched;
         }
         // RTX 40 multi-frame generation. This one is built into the fork and
@@ -877,7 +942,9 @@ fn patch_opti_ini(st: &GameStatus, d: &Path) -> Result<()> {
         // read it. From the fork's v0.8.3 the key exists only in the
         // -rtx40-mfg package, which the tick now selects; on the standard
         // package this line appends a key nothing reads, which is harmless.
-        if let Some(patched) = set_ini_key(&cur, "DLSSG", "AdaMfgUnlock", ada_mfg()) {
+        if let Some(patched) =
+            set_ini_key(&cur, "DLSSG", "AdaMfgUnlock", ada_mfg()).filter(|_| nvidia_forks)
+        {
             cur = patched;
         }
         // The Turing/Ampere unlock exists only in ShyVortex's build, where it
@@ -888,7 +955,9 @@ fn patch_opti_ini(st: &GameStatus, d: &Path) -> Result<()> {
             "DLSSG",
             "AmpereMfgUnlock",
             if ampere_mfg() { "true" } else { "false" },
-        ) {
+        )
+        .filter(|_| nvidia_forks)
+        {
             cur = patched;
         }
         // OptiScaler's own frame generation: FSR 3.1 interpolation over the
@@ -899,7 +968,7 @@ fn patch_opti_ini(st: &GameStatus, d: &Path) -> Result<()> {
         // glitching, Hudfix is required"). Off means untouched: the ini
         // carries the user's own frame-generation choice from the overlay,
         // and a refresh must not undo it.
-        if opti_fg() && matches!(st.api, game::Api::Dx12 | game::Api::Unknown) {
+        if nvidia_forks && opti_fg() && matches!(st.api, game::Api::Dx12 | game::Api::Unknown) {
             for (section, key, value) in [
                 ("FrameGen", "Enabled", "true"),
                 ("FrameGen", "FGInput", "upscaler"),
@@ -1035,6 +1104,16 @@ pub const OPTI_PRESR_REPO: &str = "wilsjo2/OptiScaler-DLSSNR-PreSR-Multipass";
 /// MFG tick; nobody picks it by name.
 pub const OPTI_UNLOCKED_REPO: &str = "ShyVortex/OptiScaler-DLSSNR-PreSR-Multipass";
 
+/// 3zwr1's AMDNR: an OptiScaler build whose neural pass runs on Radeon RX 7000
+/// and 9000 through HIP in the driver (lmxxf's MIT runtime, bundled in the
+/// zip). One 1 GB zip per release, laid out flat like the other forks, so it
+/// installs through the same step. Chosen by the GPU, never by hand.
+pub const AMDNR_REPO: &str = "3zwr1/AMD-NR---OptiScaler";
+
+/// The asset's name among the release's zips: the main package, not the
+/// Anywhere host, the Mochi component or the danielblnc runtime zips.
+const AMDNR_ASSET: &str = r"AMDNR-v[\d.]+\.zip";
+
 /// Which OptiScaler build to install; unset means Dagherbou's.
 pub const OPTI_SOURCE_ENV: &str = "DLSS5ONECLICK_OPTI_SOURCE";
 
@@ -1063,8 +1142,21 @@ pub fn opti_presr() -> bool {
     std::env::var(OPTI_SOURCE_ENV).is_ok_and(|v| v.eq_ignore_ascii_case("presr"))
 }
 
+/// True when the OptiScaler build to install is AMDNR's: the best GPU is a
+/// Radeon RX 7000 / 9000, or it was asked for by name
+/// (`DLSS5ONECLICK_OPTI_SOURCE=amdnr`). Any other value of that variable is a
+/// choice of another build and wins over the GPU.
+pub fn amdnr() -> bool {
+    match std::env::var(OPTI_SOURCE_ENV) {
+        Ok(v) => v.eq_ignore_ascii_case("amdnr"),
+        Err(_) => crate::gpu::best().is_some_and(|(_, t)| t == crate::gpu::Tier::Amd),
+    }
+}
+
 pub fn opti_repo() -> &'static str {
-    if ampere_mfg() {
+    if amdnr() {
+        AMDNR_REPO
+    } else if ampere_mfg() {
         OPTI_UNLOCKED_REPO
     } else if opti_presr() {
         OPTI_PRESR_REPO
@@ -1437,6 +1529,16 @@ fn step_renodx(
 /// `with_renodx` adds the game's RenoDX HDR mod after the DLSS 5 add-on. On
 /// the OptiScaler engine that needs ReShade too, loaded by OptiScaler as
 /// `ReShade64.dll`. RE Engine games get REFramework first on either engine.
+/// The OptiScaler engine's own steps. AMDNR carries its network inside the
+/// package; NVIDIA's model DLL is not what runs on a Radeon.
+fn opti_steps(amd: bool) -> Vec<Step> {
+    if amd {
+        vec![STEP_OPTI]
+    } else {
+        vec![STEP_OPTI, STEP_DLSSNR_ONLY]
+    }
+}
+
 pub fn plan_with(st: &GameStatus, engine: Engine, with_renodx: bool, upstream: bool) -> Vec<Step> {
     if engine == Engine::Mfg {
         return vec![STEP_RTXMFG, STEP_GPU_PREF];
@@ -1457,7 +1559,7 @@ pub fn plan_with(st: &GameStatus, engine: Engine, with_renodx: bool, upstream: b
         // Only games with native DLSS: the NR pass reads the inputs the game
         // hands to DLSS. Callers gate on mode; return the plan regardless so
         // --check can show it.
-        let mut v = vec![STEP_OPTI, STEP_DLSSNR_ONLY];
+        let mut v = opti_steps(amdnr());
         if with_renodx {
             v.push(STEP_RESHADE_VIA_OPTI);
             v.push(STEP_RENODX);
@@ -4246,6 +4348,67 @@ mod tests {
         assert_eq!(pick_opti_zip(r, true).as_deref(), Some("https://x/mfg.zip"));
     }
 
+    /// A Radeon takes AMDNR's build, which brings its own network: no NVIDIA
+    /// model step, and a setup without that DLL is finished.
+    #[test]
+    fn amdnr_is_the_build_for_a_radeon_and_needs_no_nvidia_model() {
+        let steps = opti_steps(true);
+        assert!(steps.iter().any(|s| s.name == STEP_OPTI.name));
+        assert!(!steps.iter().any(|s| s.name == STEP_DLSSNR_ONLY.name));
+        assert!(opti_steps(false)
+            .iter()
+            .any(|s| s.name == STEP_DLSSNR_ONLY.name));
+        let mut st = game::stub_status(game::Mode::Native, game::Api::Dx12);
+        st.opti = true;
+        st.dlssnr = false;
+        assert!(!st.complete());
+        st.gpu = Some((
+            crate::gpu::Gpu {
+                name: "AMD Radeon RX 7800 XT".into(),
+                vendor: String::new(),
+            },
+            crate::gpu::Tier::Amd,
+        ));
+        assert!(st.complete());
+    }
+
+    /// An installed AMDNR build is finished without NVIDIA's model DLL, which
+    /// is what the NVIDIA forks still need beside them.
+    #[test]
+    fn a_radeon_install_does_not_miss_the_nvidia_model() {
+        let mut st = game::stub_status(game::Mode::Native, game::Api::Dx12);
+        st.opti = true;
+        st.dlssnr = false;
+        assert!(missing_install_files(&st)
+            .iter()
+            .any(|m| m == game::DLSSNR_DLL));
+        st.gpu = Some((
+            crate::gpu::Gpu {
+                name: "AMD Radeon RX 9070 XT".into(),
+                vendor: String::new(),
+            },
+            crate::gpu::Tier::Amd,
+        ));
+        assert!(!missing_install_files(&st)
+            .iter()
+            .any(|m| m == game::DLSSNR_DLL));
+    }
+
+    /// The release has five zips; only the main package is the one to take.
+    #[test]
+    fn the_amdnr_asset_pattern_takes_only_the_main_package() {
+        let re = Regex::new(&format!("^{AMDNR_ASSET}$")).unwrap();
+        assert!(re.is_match("AMDNR-v0.3.5.8.zip"));
+        for other in [
+            "AMDNR-Anywhere-0.3.5.8.zip",
+            "AMDNR-Mochi-0.0.7-component.zip",
+            "v0.8.0-Runtime.zip",
+            "Daniel-0.8.0-Manual-AMDNR-0.3.5.8.zip",
+        ] {
+            assert!(!re.is_match(other), "{other}");
+        }
+    }
+
     /// The engine choice decides which fork is fetched, and nothing else.
     #[test]
     fn opti_source_selects_the_fork() {
@@ -5231,6 +5394,7 @@ RestoreComputeSignature=true
             opti: Some("v0.2.0-dlssnr".into()),
             opti_presr: Some("v0.7.7".into()),
             opti_unlocked: None,
+            amdnr: None,
             dlss: Some("dlss-310.9.0".into()),
             dlssnr: Some("dlssnr-310.8.SF-v2".into()),
             sf: None,
@@ -5287,6 +5451,7 @@ RestoreComputeSignature=true
             opti: Some("v0.2.0-dlssnr".into()),
             opti_presr: Some("v0.7.7".into()),
             opti_unlocked: None,
+            amdnr: None,
             dlss: None,
             dlssnr: None,
             sf: None,
