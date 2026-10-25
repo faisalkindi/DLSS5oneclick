@@ -27,6 +27,7 @@
 use std::fs;
 
 use crate::game::{self, Api, GameStatus, Mode};
+use crate::gpu::Tier;
 use crate::installer::{self, Consumer, Engine};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,6 +63,12 @@ const OPTI: Setup = Setup {
     consumer: Consumer::Dlss5,
     addon_tag: None,
 };
+/// RTX Encore: the last rung on an RTX 20/30/40, a different engine altogether.
+const ENCORE: Setup = Setup {
+    engine: Engine::Encore,
+    consumer: Consumer::Dlss5,
+    addon_tag: None,
+};
 
 /// Games whose reports settled the order, by exe name (lower case).
 /// Cyberpunk 2077: the ReShade route churned its feature and changed nothing;
@@ -90,8 +97,29 @@ fn profile(st: &GameStatus) -> Option<(&'static [Setup], &'static str)> {
 }
 
 /// Every setup worth trying in this game, best first. Empty when nothing this
-/// tool offers fits (a Vulkan game without DLSS of its own).
+/// tool offers fits (a Vulkan game without DLSS of its own). RTX Encore closes
+/// the list on an RTX 20/30/40, in a 64-bit game with DLSS of its own: it is a
+/// whole other setup, reached only by "Try the next setup", so it adds nothing
+/// to choose and cannot sit beside another one.
 pub fn ladder(st: &GameStatus) -> Vec<Setup> {
+    let mut l = base_ladder(st);
+    if !l.is_empty() && encore_fits(st) && !l.contains(&ENCORE) {
+        l.push(ENCORE);
+    }
+    l
+}
+
+fn encore_fits(st: &GameStatus) -> bool {
+    st.mode == Mode::Native
+        && !st.is32()
+        && !matches!(st.api, Api::Dx9 | Api::Dx10)
+        && st
+            .gpu
+            .as_ref()
+            .is_some_and(|(_, t)| matches!(t, Tier::Rtx40 | Tier::Rtx2030))
+}
+
+fn base_ladder(st: &GameStatus) -> Vec<Setup> {
     // A Radeon has no NGX, so the ReShade routes (which hand the network to
     // NVIDIA's driver) cannot run; AMDNR's OptiScaler build is the only way,
     // and it reads the inputs a game hands to DLSS.
@@ -134,6 +162,9 @@ pub fn ladder(st: &GameStatus) -> Vec<Setup> {
 pub fn installed(st: &GameStatus) -> Option<Setup> {
     if st.upstream || (st.aio && !st.opti) {
         return None;
+    }
+    if st.encore {
+        return Some(ENCORE);
     }
     if st.opti {
         return Some(OPTI);
@@ -296,6 +327,9 @@ pub fn clear() {
 /// What the setup is, in words.
 pub fn label(s: &Setup) -> String {
     match (s.engine, s.consumer, s.addon_tag) {
+        (Engine::Encore, ..) => {
+            "RTX Encore (its own Neural Rendering, frame generation and Smooth Motion)".to_owned()
+        }
         (Engine::Opti, ..) => "OptiScaler with its built-in neural rendering pass".to_owned(),
         (Engine::Aio, ..) => "ReShade + standalone AIO".to_owned(),
         (Engine::Mfg, ..) => "Universal RTXMFG only (no DLSS 5)".to_owned(),
@@ -372,7 +406,7 @@ mod tests {
         let st = native(t.path());
         assert_eq!(
             ladder(&st),
-            vec![DLSS5_NEWEST, SF, DLSS5_STEADY, DLSS5_CLASSIC, OPTI]
+            vec![DLSS5_NEWEST, SF, DLSS5_STEADY, DLSS5_CLASSIC, OPTI, ENCORE]
         );
         assert_eq!(current(&st), Some(DLSS5_NEWEST));
         assert_eq!(next(&st), Some((1, SF)));
@@ -423,7 +457,55 @@ mod tests {
         st.reshade = false;
         st.opti = true;
         assert_eq!(current(&st), Some(OPTI));
+        // RTX Encore closes the list on an RTX card.
+        assert_eq!(next(&st).map(|(_, s)| s), Some(ENCORE));
+        st.opti = false;
+        st.encore = true;
+        assert_eq!(installed(&st), Some(ENCORE));
+        assert_eq!(current(&st), Some(ENCORE));
         assert_eq!(next(&st), None);
+        assert_eq!(previous(&st).map(|(_, s)| s), Some(OPTI));
+        assert!(!hand_chosen(&st));
+    }
+
+    /// RTX Encore is made for RTX 20/30/40 and reads the game's own DLSS: it is
+    /// offered on no other card, in no 32-bit game and in none without DLSS.
+    #[test]
+    fn encore_closes_the_list_only_where_it_fits() {
+        use crate::gpu::{Gpu, Tier};
+        let t = tempfile::tempdir().unwrap();
+        let gpu = |tier| {
+            Some((
+                Gpu {
+                    name: "test card".into(),
+                    vendor: String::new(),
+                },
+                tier,
+            ))
+        };
+        let mut st = native(t.path());
+        for tier in [Tier::Rtx40, Tier::Rtx2030] {
+            st.gpu = gpu(tier);
+            assert_eq!(ladder(&st).last(), Some(&ENCORE));
+        }
+        for tier in [
+            Tier::Rtx50,
+            Tier::NvidiaNoTensor,
+            Tier::NotNvidia,
+            Tier::Unknown,
+        ] {
+            st.gpu = gpu(tier);
+            assert!(!ladder(&st).contains(&ENCORE), "{tier:?}");
+        }
+        st.gpu = gpu(Tier::Amd);
+        assert_eq!(ladder(&st), vec![OPTI]);
+        st.gpu = gpu(Tier::Rtx40);
+        st.bitness = 32;
+        assert!(!ladder(&st).contains(&ENCORE));
+        st.bitness = 64;
+        st.mode = Mode::Feeder;
+        assert!(!ladder(&st).contains(&ENCORE));
+        assert!(label(&ENCORE).contains("RTX Encore"));
     }
 
     /// Cyberpunk on ReShade stays on ReShade: the profile's OptiScaler rung is
@@ -453,7 +535,9 @@ mod tests {
         st.exe = t.path().join("Cyberpunk2077.exe");
         st.reshade = true;
         assert_eq!(current(&st), Some(DLSS5_NEWEST));
-        assert_eq!(ladder(&st).last(), Some(&OPTI));
+        let l = ladder(&st);
+        assert_eq!(l.last(), Some(&ENCORE));
+        assert_eq!(l.get(l.len() - 2), Some(&OPTI));
         st.dlss5_addon = true;
         fs::write(
             t.path().join(game::DLSS5_ADDON_MARKER),
@@ -486,7 +570,7 @@ mod tests {
         assert!(!ladder(&st).contains(&SF));
         st.bitness = 64;
         st.api = Api::Vulkan;
-        assert_eq!(ladder(&st), vec![OPTI]);
+        assert_eq!(ladder(&st), vec![OPTI, ENCORE]);
         st.mode = Mode::Feeder;
         assert!(ladder(&st).is_empty());
         assert_eq!(current(&st), None);

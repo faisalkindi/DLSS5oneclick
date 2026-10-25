@@ -849,7 +849,9 @@ impl App {
                     },
                 )
                 .map(|_| {
-                    if engine == Engine::MfgAddon {
+                    if engine == Engine::Encore {
+                        "Done. In game: Neural Rendering is on (it needs the game's DLSS Super Resolution); turn the game's own DLSS Frame Generation on for frame generation; Insert opens the RTX Encore menu.".to_owned()
+                    } else if engine == Engine::MfgAddon {
                         "Done. In game: turn on the game's own DLSS Frame Generation; Home opens ReShade \u{2192} Add-ons tab \u{2192} the MFG unlock.".to_owned()
                     } else if engine == Engine::Mfg {
                         "Done. In game: turn on the game's own DLSS Frame Generation; Backspace opens the RTXMFG menu.".to_owned()

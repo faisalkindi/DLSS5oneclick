@@ -240,6 +240,8 @@ error: {e:#}"
             Choice {
                 engine: if args.iter().any(|a| a == "--engine=opti" || a == "--opti") {
                     installer::Engine::Opti
+                } else if args.iter().any(|a| a == "--engine=encore") {
+                    installer::Engine::Encore
                 } else if args.iter().any(|a| a == "--engine=aio" || a == "--aio") {
                     installer::Engine::Aio
                 } else if args
@@ -524,6 +526,9 @@ Attach that zip to the GitHub issue.",
                 // No engine asked for and no pick: the plan follows what is in
                 // the folder.
                 let engine = match engine {
+                    installer::Engine::ReShade if rung.is_none() && st.encore => {
+                        installer::Engine::Encore
+                    }
                     installer::Engine::ReShade if rung.is_none() && st.opti => {
                         installer::Engine::Opti
                     }
@@ -679,7 +684,12 @@ Attach that zip to the GitHub issue.",
         &step,
     ) {
         Ok(_) => {
-            if engine == installer::Engine::Opti && installer::amdnr() {
+            if engine == installer::Engine::Encore {
+                println!(
+                    "
+Done. In game: Neural Rendering is on (it needs the game's DLSS Super Resolution); turn the game's own DLSS Frame Generation on for frame generation; Insert opens the RTX Encore menu."
+                );
+            } else if engine == installer::Engine::Opti && installer::amdnr() {
                 println!(
                     "
 Done. In game: turn the game's own upscaling on (DLSS, FSR or XeSS); Neural Rendering is on by default, Insert opens the AMDNR menu and Home switches it on and off."

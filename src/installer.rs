@@ -292,9 +292,36 @@ pub enum Engine {
     /// ReShade and the RTX 40 MFG add-on (`renodx-mfgunlock.addon64`) alone:
     /// multi-frame generation with no DLSS 5.
     MfgAddon,
+    /// SilyNoMeta's RTX Encore: one DLL under a name the game loads, with its
+    /// own Neural Rendering, frame generation and Smooth Motion, plus NVIDIA's
+    /// plain 310.8.0 model beside it. RTX 20/30/40, games with DLSS of their
+    /// own. A rung at the end of the setup ladder, never picked by hand.
+    Encore,
 }
 
 const RTXMFG_REPO: &str = "dashdogy/MFG-Unlocker";
+
+/// SilyNoMeta's RTX Encore: closed source, no licence of its own, MIT and BSD
+/// parts listed in its notices (which travel with the DLL). Downloaded from its
+/// release page and checked against the SHA-256 GitHub records; never hosted.
+pub const ENCORE_REPO: &str = "SilyNoMeta/rtx-encore";
+const ENCORE_ASSET: &str = r"RTX-Encore-v[\d.]+\.zip";
+/// The model RTX Encore accepts: NVIDIA's own 310.8.0, signed, from the same
+/// repository this tool's other model downloads come from. Its hash is pinned so
+/// a re-tagged release cannot slip another file in.
+const ENCORE_MODEL_TAG: &str = "dlssnr-310.8.0";
+const ENCORE_MODEL_ZIP: &str = r"nvngx_dlssnr_310\.8\.0\.zip";
+const ENCORE_MODEL_SHA256: &str =
+    "e16bcf15e16e13f527491cdf7845b2fe6521a738d8f7c9c721866a8496e1fc8e";
+
+const STEP_ENCORE: Step = Step {
+    name: "RTX Encore",
+    run: step_encore,
+};
+const STEP_ENCORE_MODEL: Step = Step {
+    name: "NVIDIA 310.8.0 model for RTX Encore",
+    run: step_encore_model,
+};
 
 /// Set (to anything) to put Universal RTXMFG beside the DLSS 5 setup as well.
 pub const RTXMFG_WITH_ENV: &str = "DLSS5ONECLICK_RTXMFG";
@@ -358,6 +385,8 @@ pub struct Latest {
     pub opti_unlocked: Option<String>,
     /// AMDNR's own numbering (Alpha0.3.5.8).
     pub amdnr: Option<String>,
+    /// Newest RTX Encore release.
+    pub encore: Option<String>,
     pub dlss: Option<String>,
     pub dlssnr: Option<String>,
     pub aio: Option<String>,
@@ -397,6 +426,7 @@ impl Latest {
             amdnr: amdnr()
                 .then(|| net::latest_tag(client, AMDNR_REPO).ok())
                 .flatten(),
+            encore: net::latest_tag(client, ENCORE_REPO).ok(),
             // Same source order as the install: NVIDIA's tag, else the mirror's.
             dlss: nvidia_dll(client, game::DLSS_DLL)
                 .map(|(t, _)| t)
@@ -423,6 +453,13 @@ pub fn missing_install_files(st: &GameStatus) -> Vec<String> {
     let mut missing = Vec::new();
     // RTXMFG alone is the one proxy DLL, which `rtxmfg` already says is there.
     if st.rtxmfg {
+        return missing;
+    }
+    // RTX Encore: its DLL (which `encore` already says is there) and the model.
+    if st.encore {
+        if !st.dlssnr {
+            missing.push(game::DLSSNR_DLL.into());
+        }
         return missing;
     }
     // ReShade and the one add-on.
@@ -514,13 +551,22 @@ pub fn stale_components(dir: &Path, latest: &Latest) -> Vec<String> {
         }
     };
     check("ReShade", mine(game::RESHADE_MARKER), &latest.reshade);
+    check(
+        "RTX Encore",
+        mine(game::ENCORE_MARKER).and_then(|t| t.lines().next().map(str::to_owned)),
+        &latest.encore,
+    );
     check("DLSS5-Feeder", mine(game::FEEDER_MARKER), &latest.feeder);
     check("nvngx_dlss.dll", mine(game::DLSS_MARKER), &latest.dlss);
-    check(
-        "nvngx_dlssnr.dll",
-        mine(game::DLSSNR_MARKER),
-        &latest.dlssnr,
-    );
+    // RTX Encore accepts exactly NVIDIA's 310.8.0, so its model is pinned and
+    // a newer one upstream is not an update for it.
+    if game::encore_proxy(dir).is_none() {
+        check(
+            "nvngx_dlssnr.dll",
+            mine(game::DLSSNR_MARKER),
+            &latest.dlssnr,
+        );
+    }
     if let Ok(m) = fs::read_to_string(dir.join(game::AIO_MANIFEST)) {
         check("DLSS5 ReShade AIO", manifest_tag(&m), &latest.aio);
     }
@@ -1540,6 +1586,9 @@ fn opti_steps(amd: bool) -> Vec<Step> {
 }
 
 pub fn plan_with(st: &GameStatus, engine: Engine, with_renodx: bool, upstream: bool) -> Vec<Step> {
+    if engine == Engine::Encore {
+        return vec![STEP_ENCORE, STEP_ENCORE_MODEL, STEP_GPU_PREF];
+    }
     if engine == Engine::Mfg {
         return vec![STEP_RTXMFG, STEP_GPU_PREF];
     }
@@ -3017,6 +3066,175 @@ fn rtxmfg_install(
     Ok(vec![format!("{proxy} (RTXMFG {tag})")])
 }
 
+/// RTX Encore: the release's one DLL, renamed to the first of the names its
+/// notes list that is free in this game, with its notices beside it. A refresh
+/// replaces a copy this tool placed when the release tag moved; a file of
+/// another mod under a name is never touched.
+fn step_encore(
+    client: &Client,
+    st: &GameStatus,
+    work: &Path,
+    progress: Progress,
+) -> Result<Vec<String>> {
+    let d = st.game_dir();
+    let proxy = game::encore_name_for(d).ok_or_else(|| {
+        anyhow!(
+            "every name RTX Encore can load under (version.dll, dinput8.dll, winmm.dll, dxgi.dll) is already used by another mod in this game. Remove one of them first."
+        )
+    })?;
+    let dest = d.join(proxy);
+    let marker = d.join(game::ENCORE_MARKER);
+    let mine = fs::read_to_string(&marker).ok();
+    progress(0, "Looking up RTX Encore");
+    let tag = net::latest_tag(client, ENCORE_REPO)?;
+    let current = dest.is_file()
+        && game::encore_proxy(d).as_deref() == Some(proxy)
+        && mine
+            .as_deref()
+            .and_then(|t| t.lines().next())
+            .map(str::trim)
+            == Some(tag.as_str());
+    if current {
+        write_encore_config(d)?;
+        return Ok(vec![format!("{proxy} already current (RTX Encore {tag})")]);
+    }
+    let url = net::github_asset_url_html(client, ENCORE_REPO, &tag, ENCORE_ASSET)?;
+    let zip_path = work.join("rtx-encore.zip");
+    net::download(
+        client,
+        &url,
+        &zip_path,
+        "RTX Encore (about 175 MB)",
+        progress,
+    )?;
+    verify_release_digest(client, ENCORE_REPO, &url, &zip_path)?;
+    let f = fs::File::open(&zip_path)?;
+    let mut zip = zip::ZipArchive::new(f).context("RTX Encore download is not a valid zip")?;
+    let dll = zip
+        .file_names()
+        .find(|n| *n == "rtx-encore.dll")
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            anyhow!("the RTX Encore release has no rtx-encore.dll - layout changed upstream")
+        })?;
+    net::extract_member(&mut zip, &dll, &dest)?;
+    let notices = zip
+        .file_names()
+        .find(|n| *n == "THIRD-PARTY-NOTICES.md")
+        .map(str::to_owned);
+    if let Some(notices) = notices {
+        net::extract_member(&mut zip, &notices, &d.join(game::ENCORE_NOTICES))?;
+    }
+    let len = fs::metadata(&dest)?.len();
+    fs::write(&marker, format!("{tag}\n{proxy}\n{len}"))?;
+    write_encore_config(d)?;
+    Ok(vec![
+        format!("{proxy} (RTX Encore {tag})"),
+        game::ENCORE_NOTICES.to_owned(),
+    ])
+}
+
+/// Neural Rendering ships off in RTX Encore, and its menu is the only other
+/// way to turn it on. The settings file is the mod's own and is never
+/// overwritten: this writes it only when there is none, with the one switch.
+fn write_encore_config(d: &Path) -> Result<()> {
+    let cfg = d.join(game::ENCORE_CONFIG);
+    if !cfg.is_file() {
+        fs::write(&cfg, "{ \"neuralRendering\": { \"nrEnabled\": true } }\n")?;
+    }
+    Ok(())
+}
+
+/// NVIDIA's plain 310.8.0 `nvngx_dlssnr.dll`, which RTX Encore accepts (it
+/// refuses any other version, the patched builds this tool uses elsewhere
+/// included). Replaces a model this tool placed; keeps a file that already is
+/// that exact build; stops at one that is neither, which is someone else's.
+fn step_encore_model(
+    client: &Client,
+    st: &GameStatus,
+    work: &Path,
+    progress: Progress,
+) -> Result<Vec<String>> {
+    let d = st.game_dir();
+    let dest = d.join(game::DLSSNR_DLL);
+    let marker = d.join(game::DLSSNR_MARKER);
+    let is_plain =
+        |p: &Path| net::sha256_file(p).is_ok_and(|h| h.eq_ignore_ascii_case(ENCORE_MODEL_SHA256));
+    if dest.is_file() {
+        match fs::read_to_string(&marker) {
+            Ok(m) if m.trim() == ENCORE_MODEL_TAG && is_plain(&dest) => {
+                return Ok(vec![format!(
+                    "{} already current ({ENCORE_MODEL_TAG})",
+                    game::DLSSNR_DLL
+                )]);
+            }
+            Ok(_) => progress(
+                0,
+                &format!("{}: switching to NVIDIA's 310.8.0", game::DLSSNR_DLL),
+            ),
+            Err(_) if is_plain(&dest) => {
+                return Ok(vec![format!(
+                    "{} present (NVIDIA's 310.8.0, not placed by this tool)",
+                    game::DLSSNR_DLL
+                )]);
+            }
+            Err(_) => bail!(
+                "{} in this game is not NVIDIA's 310.8.0 build, which RTX Encore requires, and this tool did not place it. Rename or remove it, then run this again.",
+                game::DLSSNR_DLL
+            ),
+        }
+    }
+    progress(0, "Looking up NVIDIA's 310.8.0 model");
+    let url = net::github_asset_url_html(client, RHI_REPO, ENCORE_MODEL_TAG, ENCORE_MODEL_ZIP)?;
+    let z = work.join("encore-model.zip");
+    net::download(client, &url, &z, "NVIDIA 310.8.0 model", progress)?;
+    install_single_from_zip(&z, game::DLSSNR_DLL, &dest)?;
+    if !is_plain(&dest) {
+        let _ = fs::remove_file(&dest);
+        bail!("the {ENCORE_MODEL_TAG} download is not the file this tool expects (its SHA-256 differs); try again later");
+    }
+    fs::write(&marker, ENCORE_MODEL_TAG.as_bytes())?;
+    Ok(vec![format!("{} ({ENCORE_MODEL_TAG})", game::DLSSNR_DLL)])
+}
+
+/// Take out the RTX Encore this tool placed and its notices. The DLL goes only
+/// when it still has the size that was written (a copy swapped by hand is
+/// theirs). The mod's own settings file and logs stay: they are the player's
+/// choices and the evidence for a bug report.
+fn remove_encore(d: &Path) -> Vec<String> {
+    let marker = d.join(game::ENCORE_MARKER);
+    let text = fs::read_to_string(&marker).unwrap_or_default();
+    let wrote: Option<u64> = text.lines().nth(2).and_then(|l| l.trim().parse().ok());
+    let mut out = Vec::new();
+    if let Some(name) = text
+        .lines()
+        .nth(1)
+        .map(|l| l.trim().to_owned())
+        .filter(|n| !n.is_empty() && !n.contains(['/', '\\']))
+    {
+        let p = d.join(&name);
+        let same = wrote.is_none_or(|w| fs::metadata(&p).is_ok_and(|m| m.len() == w));
+        if p.is_file() && same && fs::remove_file(&p).is_ok() {
+            out.push(name);
+        }
+    }
+    if marker.is_file() {
+        if fs::remove_file(d.join(game::ENCORE_NOTICES)).is_ok() {
+            out.push(game::ENCORE_NOTICES.to_owned());
+        }
+        if fs::remove_file(&marker).is_ok() {
+            out.push(game::ENCORE_MARKER.to_owned());
+        }
+    }
+    out
+}
+
+/// True when something this tool installs already carries a neural pass or
+/// owns a name RTX Encore needs, so Encore must not be put beside it.
+fn encore_blocked_by(st: &GameStatus) -> bool {
+    st.reshade || st.opti || st.aio || st.upstream || st.rtxmfg || st.rtxmfg_with || st.mfg_only
+}
+
 fn step_rtxmfg_cleanup(
     _client: &Client,
     st: &GameStatus,
@@ -3879,6 +4097,40 @@ pub fn run_all_with(
                 st.api.label()
             );
         }
+    } else if engine == Engine::Encore {
+        // Two neural passes in one game spoil the image and crash it (RTX
+        // Encore's own notes say so about two copies of itself). "Try the next
+        // setup" takes the old one out first; asked for by name, it must be gone.
+        if encore_blocked_by(&st) {
+            bail!(
+                "another setup (ReShade, OptiScaler or another add-on) is installed in this game, and RTX Encore has its own Neural Rendering. Run Remove first, or use \"Try the next setup\", which takes the old one out."
+            );
+        }
+        if st.is32() {
+            bail!("RTX Encore is 64-bit only.");
+        }
+        if st.mode != game::Mode::Native {
+            bail!(
+                "RTX Encore works on the game's own DLSS, and this game has none - use the ReShade engine."
+            );
+        }
+        if matches!(st.api, game::Api::Dx9 | game::Api::Dx10) {
+            bail!(
+                "RTX Encore needs a DirectX 11, DirectX 12 or Vulkan game; this one is {}.",
+                st.api.label()
+            );
+        }
+        if let Some((g, t)) = &st.gpu {
+            if !matches!(t, crate::gpu::Tier::Rtx40 | crate::gpu::Tier::Rtx2030)
+                && !game::skip_gpu_check()
+            {
+                bail!(
+                    "RTX Encore is made for RTX 20, 30 and 40 cards; this one is {} ({}).",
+                    g.name,
+                    t.label()
+                );
+            }
+        }
     } else if engine != Engine::Opti {
         if let Some(p) = st.reshade_engine_problem() {
             bail!("{p}");
@@ -4107,6 +4359,7 @@ pub fn uninstall(exe: &Path) -> Result<Vec<String>> {
     }
     let mut removed = Vec::new();
     removed.extend(remove_rtxmfg(d));
+    removed.extend(remove_encore(d));
     uninstall_opti(d, &mut removed)?;
     uninstall_aio(d, &mut removed)?;
     // Files first, markers last: a delete that fails (a file the game still
@@ -4346,6 +4599,119 @@ mod tests {
             Some("https://x/std.zip")
         );
         assert_eq!(pick_opti_zip(r, true).as_deref(), Some("https://x/mfg.zip"));
+    }
+
+    /// RTX Encore is one DLL under the first free name its notes list, so a
+    /// mod already holding `version.dll` keeps it, and Remove takes out only
+    /// what this tool wrote and leaves the mod's own settings and logs.
+    #[test]
+    fn encore_takes_a_free_name_and_remove_leaves_its_settings() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path();
+        assert_eq!(game::encore_name_for(d), Some("version.dll"));
+        // Another mod's version.dll is left alone; the next name is used.
+        fs::write(d.join("version.dll"), b"someone else's").unwrap();
+        assert_eq!(game::encore_name_for(d), Some("dinput8.dll"));
+        for n in ["dinput8.dll", "winmm.dll", "dxgi.dll"] {
+            fs::write(d.join(n), b"x").unwrap();
+        }
+        assert_eq!(game::encore_name_for(d), None);
+        // What this tool placed: marker (tag, name, size), the DLL, the notices.
+        fs::remove_file(d.join("winmm.dll")).unwrap();
+        fs::write(d.join("winmm.dll"), vec![7u8; 10]).unwrap();
+        fs::write(d.join(game::ENCORE_MARKER), "v1.4.3\nwinmm.dll\n10").unwrap();
+        fs::write(d.join(game::ENCORE_NOTICES), b"notices").unwrap();
+        fs::write(d.join(game::ENCORE_CONFIG), b"{}").unwrap();
+        assert_eq!(game::encore_proxy(d).as_deref(), Some("winmm.dll"));
+        assert_eq!(game::encore_name_for(d), Some("winmm.dll"));
+        let gone = remove_encore(d);
+        assert!(gone.contains(&"winmm.dll".to_owned()));
+        assert!(gone.contains(&game::ENCORE_MARKER.to_owned()));
+        assert!(!d.join("winmm.dll").exists());
+        assert!(!d.join(game::ENCORE_MARKER).exists());
+        assert!(!d.join(game::ENCORE_NOTICES).exists());
+        // The mod's own settings, and the other mods' files, stay.
+        assert!(d.join(game::ENCORE_CONFIG).is_file());
+        assert!(d.join("version.dll").is_file());
+        // A DLL swapped by hand after the install (different size) is theirs.
+        fs::write(d.join("winmm.dll"), vec![7u8; 99]).unwrap();
+        fs::write(d.join(game::ENCORE_MARKER), "v1.4.3\nwinmm.dll\n10").unwrap();
+        remove_encore(d);
+        assert!(d.join("winmm.dll").is_file());
+    }
+
+    /// A finished Encore install is not "missing" ReShade's files, and its
+    /// pinned model is never reported as out of date.
+    #[test]
+    fn encore_install_is_judged_by_its_own_files() {
+        let mut st = game::stub_status(game::Mode::Native, game::Api::Dx12);
+        st.encore = true;
+        st.dlssnr = true;
+        assert!(missing_install_files(&st).is_empty());
+        st.dlssnr = false;
+        assert_eq!(
+            missing_install_files(&st),
+            vec![game::DLSSNR_DLL.to_owned()]
+        );
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path();
+        fs::write(d.join(game::DLSSNR_MARKER), ENCORE_MODEL_TAG).unwrap();
+        let latest = Latest {
+            dlssnr: Some("dlssnr-310.8.SF-v2".into()),
+            ..Latest::default()
+        };
+        assert!(stale_components(d, &latest)
+            .iter()
+            .any(|l| l.contains("nvngx_dlssnr.dll")));
+        fs::write(d.join("version.dll"), b"x").unwrap();
+        fs::write(d.join(game::ENCORE_MARKER), "v1.4.3\nversion.dll\n1").unwrap();
+        assert!(!stale_components(d, &latest)
+            .iter()
+            .any(|l| l.contains("nvngx_dlssnr.dll")));
+    }
+
+    /// Encore refuses to go in beside another setup: two neural passes in one
+    /// game spoil the image.
+    #[test]
+    fn encore_refuses_to_sit_beside_another_setup() {
+        let mut st = game::stub_status(game::Mode::Native, game::Api::Dx12);
+        assert!(!encore_blocked_by(&st));
+        st.reshade = true;
+        assert!(encore_blocked_by(&st));
+        st.reshade = false;
+        st.opti = true;
+        assert!(encore_blocked_by(&st));
+        st.opti = false;
+        st.rtxmfg_with = true;
+        assert!(encore_blocked_by(&st));
+        // Its own install is not "another setup".
+        st.rtxmfg_with = false;
+        st.encore = true;
+        assert!(!encore_blocked_by(&st));
+    }
+
+    /// The Encore setup is its DLL and the plain NVIDIA model, then the GPU
+    /// preference; it needs the game's own DLSS and a 20/30/40 card.
+    #[test]
+    fn encore_plan_and_refusals() {
+        let mut st = game::stub_status(game::Mode::Native, game::Api::Dx12);
+        let names: Vec<&str> = plan_with(&st, Engine::Encore, false, false)
+            .iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(names[0], STEP_ENCORE.name);
+        assert_eq!(names[1], STEP_ENCORE_MODEL.name);
+        // A finished Encore setup needs the model beside its DLL.
+        st.encore = true;
+        st.dlssnr = false;
+        assert!(!st.complete());
+        st.dlssnr = true;
+        assert!(st.complete());
+        // Pinned model hash is a full SHA-256.
+        assert_eq!(ENCORE_MODEL_SHA256.len(), 64);
+        let re = Regex::new(&format!("^{ENCORE_ASSET}$")).unwrap();
+        assert!(re.is_match("RTX-Encore-v1.4.3.zip"));
+        assert!(!re.is_match("SHA256SUMS-1.4.3.txt"));
     }
 
     /// A Radeon takes AMDNR's build, which brings its own network: no NVIDIA
@@ -5395,6 +5761,7 @@ RestoreComputeSignature=true
             opti_presr: Some("v0.7.7".into()),
             opti_unlocked: None,
             amdnr: None,
+            encore: None,
             dlss: Some("dlss-310.9.0".into()),
             dlssnr: Some("dlssnr-310.8.SF-v2".into()),
             sf: None,
@@ -5452,6 +5819,7 @@ RestoreComputeSignature=true
             opti_presr: Some("v0.7.7".into()),
             opti_unlocked: None,
             amdnr: None,
+            encore: None,
             dlss: None,
             dlssnr: None,
             sf: None,

@@ -74,6 +74,13 @@ pub const AIO_MANIFEST: &str = ".dlss5oneclick-aio-manifest";
 /// tag, the file name it was given in the game folder (`dxgi.dll`, or
 /// `version.dll` in a Vulkan game), and the size of that file as written.
 pub const RTXMFG_MARKER: &str = "RTXMFG.dll.dlss5oneclick";
+/// RTX Encore's one DLL, renamed to a name the game loads: this marker records
+/// the release tag, the name it went in as and the size written (three lines).
+pub const ENCORE_MARKER: &str = "rtx-encore.dll.dlss5oneclick";
+/// The mod's own settings file, created and rewritten by the mod itself.
+pub const ENCORE_CONFIG: &str = "rtx-encore.jsonc";
+/// Its third-party notices travel with every copy of a release.
+pub const ENCORE_NOTICES: &str = "RTX-Encore-THIRD-PARTY-NOTICES.md";
 /// Files this tool wrote for an OptiScaler install, one path per line.
 pub const OPTI_MANIFEST: &str = ".dlss5oneclick-optiscaler-manifest";
 /// Sidecar written next to an `nvngx_dlss.dll` this tool placed, so it is never mistaken for the game's own.
@@ -1165,6 +1172,9 @@ pub struct GameStatus {
     pub rtxmfg: bool,
     /// Universal RTXMFG placed beside a DLSS 5 setup (its own proxy name).
     pub rtxmfg_with: bool,
+    /// RTX Encore (frame generation and its own Neural Rendering) placed by
+    /// this tool: the whole setup is that one DLL and the NVIDIA model.
+    pub encore: bool,
     /// The RTX 40 multi-frame-generation add-on is already beside the game.
     pub mfg: bool,
     /// ...and it is the only thing this tool put there besides ReShade: no
@@ -1221,6 +1231,7 @@ pub(crate) fn stub_status(mode: Mode, api: Api) -> GameStatus {
         aio: false,
         rtxmfg: false,
         rtxmfg_with: false,
+        encore: false,
         mfg: false,
         mfg_only: false,
         unreal_likely: false,
@@ -1400,6 +1411,10 @@ impl GameStatus {
         // Nothing else belongs to this setup: the one DLL is all of it.
         if self.rtxmfg {
             return true;
+        }
+        // RTX Encore: its DLL, and NVIDIA's model beside it for Neural Rendering.
+        if self.encore {
+            return self.dlssnr;
         }
         // ReShade and the one add-on.
         if self.mfg_only {
@@ -1613,6 +1628,7 @@ pub fn inspect(exe: &Path) -> Result<GameStatus> {
         aio: d.join(AIO_ADDON).is_file(),
         rtxmfg: rtxmfg_marker(d).is_some_and(|(_, with)| !with),
         rtxmfg_with: rtxmfg_marker(d).is_some_and(|(_, with)| with),
+        encore: encore_proxy(d).is_some(),
         mfg: d.join(MFG_ADDON).is_file(),
         mfg_only: d.join(MFG_ADDON).is_file()
             && ![
@@ -1635,6 +1651,7 @@ pub fn inspect(exe: &Path) -> Result<GameStatus> {
         // placed from that release is not a ReShade.
         reshade: !d.join(OPTI_MANIFEST).is_file()
             && rtxmfg_proxy(d).as_deref() != Some(RESHADE_PROXY)
+            && encore_proxy(d).as_deref() != Some(RESHADE_PROXY)
             && is_reshade_dll(&d.join(RESHADE_PROXY)),
         headers: RESHADE_HEADERS.iter().all(|h| shaders.join(h).is_file()),
         feeder,
@@ -2036,6 +2053,51 @@ pub fn rtxmfg_marker(dir: &Path) -> Option<(String, bool)> {
 /// that file is still there.
 pub fn rtxmfg_proxy(dir: &Path) -> Option<String> {
     rtxmfg_marker(dir).map(|(name, _)| name)
+}
+
+/// The names RTX Encore's own install notes say to try, in order. `dxgi.dll`
+/// is last because ReShade, OptiScaler and DXVK all want it.
+pub const ENCORE_NAMES: [&str; 4] = ["version.dll", "dinput8.dll", "winmm.dll", "dxgi.dll"];
+
+/// True for an RTX Encore DLL, whoever placed it and whatever it is called: the
+/// release carries its own name as a wide string.
+pub fn is_encore_dll(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() || meta.len() < (1 << 20) || meta.len() > (128 << 20) {
+        return false;
+    }
+    let needle: Vec<u8> = "RTX Encore"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    fs::read(path).is_ok_and(|b| b.windows(needle.len()).any(|w| w == needle.as_slice()))
+}
+
+/// The RTX Encore proxy this tool placed in `dir`: its marker's second line,
+/// when that file is still there.
+pub fn encore_proxy(dir: &Path) -> Option<String> {
+    let text = fs::read_to_string(dir.join(ENCORE_MARKER)).ok()?;
+    let name = text.lines().nth(1)?.trim().to_owned();
+    (!name.is_empty() && !name.contains(['/', '\\']) && dir.join(&name).is_file()).then_some(name)
+}
+
+/// The first of RTX Encore's names that is free in `dir`, or the one it
+/// already sits under (ours, or any copy of the mod).
+pub fn encore_name_for(dir: &Path) -> Option<&'static str> {
+    if let Some(mine) = encore_proxy(dir) {
+        if let Some(n) = ENCORE_NAMES.iter().find(|n| **n == mine) {
+            return Some(n);
+        }
+    }
+    ENCORE_NAMES
+        .iter()
+        .find(|n| {
+            let p = dir.join(n);
+            !p.is_file() || is_encore_dll(&p)
+        })
+        .copied()
 }
 
 /// Sidecar markers this tool leaves so Install / Update / Remove know the folder.
