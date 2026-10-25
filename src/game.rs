@@ -114,6 +114,17 @@ pub const REFRAMEWORK_DLL: &str = "dinput8.dll";
 pub const REFRAMEWORK_MARKER: &str = ".dlss5oneclick-reframework";
 /// Every RE Engine game keeps its base archive under this name next to the exe.
 pub const RE_ENGINE_PAK: &str = "re_chunk_000.pak";
+
+/// Gears of War: E-Day's own exe, under the folder the launch stub sits in.
+const GEARS_EDAY_EXE: [&str; 4] = ["FairlightConcept", "Binaries", "WinGDK", "GoWEDay.exe"];
+
+/// True for the Gears of War: E-Day install in `d`.
+pub fn is_gears_eday(d: &Path) -> bool {
+    GEARS_EDAY_EXE
+        .iter()
+        .fold(d.to_path_buf(), |p, n| p.join(n))
+        .is_file()
+}
 pub const RESHADE_INI: &str = "ReShade.ini";
 pub const RESHADE_PRESET: &str = "ReShadePreset.ini";
 

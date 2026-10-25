@@ -969,6 +969,15 @@ fn patch_opti_ini(st: &GameStatus, d: &Path) -> Result<()> {
         if let Some(patched) = set_dlss_nr_enabled(&cur).filter(|_| nvidia_forks) {
             cur = patched;
         }
+        // Gears of War: E-Day flickers all over its menus and play once
+        // OptiScaler reports the Radeon as an RTX 4090 (on by default for
+        // AMD). Switching only that off took the changed pixels per frame on
+        // a still menu from 28% / 55% / 12% to under 10% / 6% / 2%; the
+        // neural pass kept running. Other games may need the spoof to show
+        // their DLSS option, so only this one is touched.
+        if let Some(patched) = gears_spoof_off(&cur, d).filter(|_| amdnr()) {
+            cur = patched;
+        }
         // The frame stays full size; only the model's own work is done small and
         // enlarged, and its cost falls with the square of this. The single
         // biggest performance lever on this route.
@@ -1067,6 +1076,11 @@ fn patch_opti_ini(st: &GameStatus, d: &Path) -> Result<()> {
         fs::write(&ini, cur)?;
     }
     Ok(())
+}
+
+/// `[Spoofing] Dxgi=false` for the Gears of War: E-Day folder `d`, else `None`.
+fn gears_spoof_off(ini: &str, d: &Path) -> Option<String> {
+    game::is_gears_eday(d).then(|| set_ini_key(ini, "Spoofing", "Dxgi", "false"))?
 }
 
 /// Remove an OptiScaler install recorded in the manifest.
@@ -4716,6 +4730,33 @@ mod tests {
 
     /// A Radeon takes AMDNR's build, which brings its own network: no NVIDIA
     /// model step, and a setup without that DLL is finished.
+    /// Spoofing the Radeon as an RTX 4090 makes Gears of War: E-Day flicker; the
+    /// switch is turned off for that game's folder and for no other.
+    #[test]
+    fn gears_eday_gets_dxgi_spoofing_off_and_other_games_do_not() {
+        let ini = "[Spoofing]
+Dxgi=auto
+";
+        let t = tempfile::tempdir().unwrap();
+        assert!(gears_spoof_off(ini, t.path()).is_none());
+        let exe = t.path().join("FairlightConcept/Binaries/WinGDK");
+        fs::create_dir_all(&exe).unwrap();
+        fs::write(exe.join("GoWEDay.exe"), b"x").unwrap();
+        assert_eq!(
+            gears_spoof_off(ini, t.path()).unwrap(),
+            "[Spoofing]
+Dxgi=false
+"
+        );
+        assert!(gears_spoof_off(
+            "[Spoofing]
+Dxgi=false
+",
+            t.path()
+        )
+        .is_none());
+    }
+
     #[test]
     fn amdnr_is_the_build_for_a_radeon_and_needs_no_nvidia_model() {
         let steps = opti_steps(true);
