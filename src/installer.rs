@@ -975,7 +975,7 @@ fn patch_opti_ini(st: &GameStatus, d: &Path) -> Result<()> {
         // a still menu from 28% / 55% / 12% to under 10% / 6% / 2%; the
         // neural pass kept running. Other games may need the spoof to show
         // their DLSS option, so only this one is touched.
-        if let Some(patched) = gears_spoof_off(&cur, d).filter(|_| amdnr()) {
+        if let Some(patched) = gears_tuning(&cur, d).filter(|_| amdnr()) {
             cur = patched;
         }
         // The frame stays full size; only the model's own work is done small and
@@ -1078,9 +1078,29 @@ fn patch_opti_ini(st: &GameStatus, d: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `[Spoofing] Dxgi=false` for the Gears of War: E-Day folder `d`, else `None`.
-fn gears_spoof_off(ini: &str, d: &Path) -> Option<String> {
-    game::is_gears_eday(d).then(|| set_ini_key(ini, "Spoofing", "Dxgi", "false"))?
+/// The Gears of War: E-Day settings for folder `d`, else `None` (or when the
+/// ini already has them): GPU spoofing off, and Residual strength 1.4 unless
+/// the user has set their own. At AMDNR's default (`auto`) a tester on an
+/// RX 9070 XT called the effect "very minimal"; at 1.4 they saw it.
+fn gears_tuning(ini: &str, d: &Path) -> Option<String> {
+    if !game::is_gears_eday(d) {
+        return None;
+    }
+    let mut cur = ini.to_string();
+    let mut changed = false;
+    if let Some(p) = set_ini_key(&cur, "Spoofing", "Dxgi", "false") {
+        cur = p;
+        changed = true;
+    }
+    let unset = ini_value(&cur, "DlssNr", "AmdResidualIntensity")
+        .is_none_or(|v| v.trim().is_empty() || v.trim().eq_ignore_ascii_case("auto"));
+    if unset {
+        if let Some(p) = set_ini_key(&cur, "DlssNr", "AmdResidualIntensity", "1.4") {
+            cur = p;
+            changed = true;
+        }
+    }
+    changed.then_some(cur)
 }
 
 /// Remove an OptiScaler install recorded in the manifest.
@@ -4730,31 +4750,44 @@ mod tests {
 
     /// A Radeon takes AMDNR's build, which brings its own network: no NVIDIA
     /// model step, and a setup without that DLL is finished.
-    /// Spoofing the Radeon as an RTX 4090 makes Gears of War: E-Day flicker; the
-    /// switch is turned off for that game's folder and for no other.
+    /// Gears of War: E-Day on AMDNR: spoofing off (it flickered with the Radeon
+    /// reported as an RTX 4090) and Residual strength 1.4 where the user has not
+    /// set one; no other game's folder is touched.
     #[test]
-    fn gears_eday_gets_dxgi_spoofing_off_and_other_games_do_not() {
+    fn gears_eday_gets_spoofing_off_and_residual_strength_and_other_games_do_not() {
         let ini = "[Spoofing]
 Dxgi=auto
+
+[DlssNr]
+AmdResidualIntensity=auto
 ";
         let t = tempfile::tempdir().unwrap();
-        assert!(gears_spoof_off(ini, t.path()).is_none());
+        assert!(gears_tuning(ini, t.path()).is_none());
         let exe = t.path().join("FairlightConcept/Binaries/WinGDK");
         fs::create_dir_all(&exe).unwrap();
         fs::write(exe.join("GoWEDay.exe"), b"x").unwrap();
-        assert_eq!(
-            gears_spoof_off(ini, t.path()).unwrap(),
+        let out = gears_tuning(ini, t.path()).unwrap();
+        assert!(out.contains("Dxgi=false") && out.contains("AmdResidualIntensity=1.4"));
+        // Already tuned: nothing to write.
+        assert!(gears_tuning(&out, t.path()).is_none());
+        // A value the user set is kept; the spoofing fix still lands.
+        let own = "[Spoofing]
+Dxgi=auto
+
+[DlssNr]
+AmdResidualIntensity=2.0
+";
+        let out = gears_tuning(own, t.path()).unwrap();
+        assert!(out.contains("Dxgi=false") && out.contains("AmdResidualIntensity=2.0"));
+        // A fresh ini without the key gets one.
+        let bare = gears_tuning(
             "[Spoofing]
-Dxgi=false
-"
-        );
-        assert!(gears_spoof_off(
-            "[Spoofing]
-Dxgi=false
+Dxgi=auto
 ",
-            t.path()
+            t.path(),
         )
-        .is_none());
+        .unwrap();
+        assert!(bare.contains("AmdResidualIntensity=1.4"));
     }
 
     #[test]
