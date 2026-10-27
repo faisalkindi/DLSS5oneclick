@@ -790,7 +790,7 @@ fn step_opti(
     let asset = asset.as_str();
     let zip_path = work.join("optiscaler-dlssnr.zip");
     let label = if amdnr() {
-        "AMDNR (about 1 GB)"
+        "AMDNR"
     } else {
         "OptiScaler DLSS-NR"
     };
@@ -798,6 +798,28 @@ fn step_opti(
     if amdnr() {
         verify_release_digest(client, repo, asset, &zip_path)?;
     }
+    // A package without the lmxxf runtime needs its companion zip, or the
+    // network never starts. Both are fetched and checked before a byte is
+    // written into the game folder.
+    let lmxxf_zip = if amdnr() && !zip_has_lmxxf(&zip_path)? {
+        let tag = latest.clone().ok_or_else(|| {
+            anyhow!("could not read {repo}'s newest release; try again in a minute")
+        })?;
+        let url = net::github_asset_url_html(client, repo, &tag, AMDNR_LMXXF_ASSET)
+            .context("this AMDNR release has no lmxxf runtime in its package or beside it")?;
+        let path = work.join("amdnr-lmxxf.zip");
+        net::download(
+            client,
+            &url,
+            &path,
+            "AMDNR lmxxf runtime (about 750 MB)",
+            progress,
+        )?;
+        verify_release_digest(client, repo, &url, &path)?;
+        Some(path)
+    } else {
+        None
+    };
 
     // What the previous install of this tool put there, so files the new
     // package no longer ships can be taken away again. A leftover
@@ -875,6 +897,14 @@ fn step_opti(
     }
     if !installed.iter().any(|p| p == game::RESHADE_PROXY) {
         bail!("the OptiScaler release had no OptiScaler.dll — layout changed upstream");
+    }
+    if let Some(path) = &lmxxf_zip {
+        let mut z = zip::ZipArchive::new(fs::File::open(path)?)
+            .context("the AMDNR lmxxf download is not a valid zip")?;
+        for name in AMDNR_LMXXF_FILES {
+            net::extract_member(&mut z, name, &d.join(name))?;
+            installed.push(name.to_owned());
+        }
     }
     // OptiScaler ships DLSS Neural Rendering off, and its overlay toggle lives
     // only in memory unless the user finds the Save button -- so the whole
@@ -1103,6 +1133,15 @@ fn gears_tuning(ini: &str, d: &Path) -> Option<String> {
     changed.then_some(cur)
 }
 
+/// True when the zip carries the lmxxf runtime files itself.
+fn zip_has_lmxxf(zip_path: &Path) -> Result<bool> {
+    let zip = zip::ZipArchive::new(fs::File::open(zip_path)?)
+        .context("OptiScaler download is not a valid zip")?;
+    Ok(AMDNR_LMXXF_FILES
+        .iter()
+        .all(|f| zip.file_names().any(|n| n.eq_ignore_ascii_case(f))))
+}
+
 /// Remove an OptiScaler install recorded in the manifest.
 fn uninstall_opti(d: &Path, removed: &mut Vec<String>) -> Result<()> {
     uninstall_manifest(
@@ -1192,7 +1231,11 @@ pub const AMDNR_REPO: &str = "3zwr1/AMD-NR---OptiScaler";
 
 /// The asset's name among the release's zips: the main package, not the
 /// Anywhere host, the Mochi component or the danielblnc runtime zips.
-const AMDNR_ASSET: &str = r"AMDNR-v[\d.]+\.zip";
+const AMDNR_ASSET: &str = r"AMDNR-v[\d.]+(?:R\d+)?\.zip";
+/// From 0.3.5.8R1 the lmxxf runtime (`LmxxfNrRuntime.dll` and its 760 MB
+/// `.pak`) is a separate zip beside the main package instead of inside it.
+const AMDNR_LMXXF_ASSET: &str = r"AMDNR-lmxxf-[\d.]+(?:R\d+)?\.zip";
+const AMDNR_LMXXF_FILES: [&str; 2] = ["LmxxfNrRuntime.dll", "LmxxfNrRuntime.pak"];
 
 /// Which OptiScaler build to install; unset means Dagherbou's.
 pub const OPTI_SOURCE_ENV: &str = "DLSS5ONECLICK_OPTI_SOURCE";
@@ -4834,11 +4877,23 @@ Dxgi=auto
             .any(|m| m == game::DLSSNR_DLL));
     }
 
+    /// 0.3.5.8R1 moved the lmxxf runtime into its own zip; it is found by
+    /// its name and the main-package pattern does not take it.
+    #[test]
+    fn the_amdnr_lmxxf_companion_is_found_by_name() {
+        let re = Regex::new(&format!("^{AMDNR_LMXXF_ASSET}$")).unwrap();
+        assert!(re.is_match("AMDNR-lmxxf-0.3.5.8R1.zip"));
+        let main = Regex::new(&format!("^{AMDNR_ASSET}$")).unwrap();
+        assert!(!main.is_match("AMDNR-lmxxf-0.3.5.8R1.zip"));
+        assert!(!re.is_match("AMDNR-v0.3.5.8R1.zip"));
+    }
+
     /// The release has five zips; only the main package is the one to take.
     #[test]
     fn the_amdnr_asset_pattern_takes_only_the_main_package() {
         let re = Regex::new(&format!("^{AMDNR_ASSET}$")).unwrap();
         assert!(re.is_match("AMDNR-v0.3.5.8.zip"));
+        assert!(re.is_match("AMDNR-v0.3.5.8R1.zip"));
         for other in [
             "AMDNR-Anywhere-0.3.5.8.zip",
             "AMDNR-Mochi-0.0.7-component.zip",
