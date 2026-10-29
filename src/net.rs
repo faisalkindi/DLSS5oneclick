@@ -165,6 +165,96 @@ pub fn latest_tag(client: &Client, repo: &str) -> Result<String> {
     })
 }
 
+/// A read-only, seekable view of a remote file fetched in HTTP Range chunks,
+/// so a zip's file list can be read without downloading the zip.
+struct RangeFile {
+    client: Client,
+    url: String,
+    len: u64,
+    pos: u64,
+    buf_start: u64,
+    buf: Vec<u8>,
+}
+
+const RANGE_CHUNK: u64 = 256 * 1024;
+
+impl RangeFile {
+    fn open(client: &Client, url: &str) -> Result<Self> {
+        let resp = client
+            .head(url)
+            .send()
+            .with_context(|| format!("request failed: {url}"))?;
+        if !resp.status().is_success() {
+            bail!("{url}: HTTP {}", resp.status());
+        }
+        let len = resp
+            .content_length()
+            .filter(|l| *l > 0)
+            .ok_or_else(|| anyhow!("{url}: no content length"))?;
+        Ok(Self {
+            client: client.clone(),
+            url: resp.url().as_str().to_owned(),
+            len,
+            pos: 0,
+            buf_start: 0,
+            buf: Vec::new(),
+        })
+    }
+}
+
+impl Read for RangeFile {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        let io_err = |e: &dyn std::fmt::Display| std::io::Error::other(e.to_string());
+        if self.pos >= self.len || out.is_empty() {
+            return Ok(0);
+        }
+        let held = self.pos >= self.buf_start && self.pos < self.buf_start + self.buf.len() as u64;
+        if !held {
+            let end = (self.pos + RANGE_CHUNK).min(self.len) - 1;
+            let resp = self
+                .client
+                .get(&self.url)
+                .header("Range", format!("bytes={}-{end}", self.pos))
+                .send()
+                .map_err(|e| io_err(&e))?;
+            if resp.status().as_u16() != 206 {
+                return Err(io_err(&format!("range request answered {}", resp.status())));
+            }
+            self.buf = resp.bytes().map_err(|e| io_err(&e))?.to_vec();
+            self.buf_start = self.pos;
+            if self.buf.is_empty() {
+                return Ok(0);
+            }
+        }
+        let off = (self.pos - self.buf_start) as usize;
+        let n = out.len().min(self.buf.len() - off);
+        out[..n].copy_from_slice(&self.buf[off..off + n]);
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl Seek for RangeFile {
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        let next = match to {
+            std::io::SeekFrom::Start(n) => Some(n),
+            std::io::SeekFrom::End(d) => self.len.checked_add_signed(d),
+            std::io::SeekFrom::Current(d) => self.pos.checked_add_signed(d),
+        };
+        self.pos = next.ok_or_else(|| std::io::Error::other("seek before the start"))?;
+        Ok(self.pos)
+    }
+}
+
+/// The file names inside the zip at `url`, read from its central directory
+/// with a few small Range requests instead of downloading it.
+pub fn remote_zip_names(client: &Client, url: &str) -> Result<Vec<String>> {
+    let file = RangeFile::open(client, url)?;
+    let zip = zip::ZipArchive::new(std::io::BufReader::new(file))
+        .with_context(|| format!("could not read the file list of {url}"))?;
+    Ok(zip.file_names().map(str::to_owned).collect())
+}
+
 /// SHA-256 of a file, lower-case hex.
 pub fn sha256_file(path: &Path) -> Result<String> {
     use sha2::{Digest, Sha256};

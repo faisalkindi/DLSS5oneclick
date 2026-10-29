@@ -424,7 +424,7 @@ impl Latest {
             opti_presr: net::latest_tag(client, OPTI_PRESR_REPO).ok(),
             opti_unlocked: net::latest_tag(client, OPTI_UNLOCKED_REPO).ok(),
             amdnr: amdnr()
-                .then(|| net::latest_tag(client, AMDNR_REPO).ok())
+                .then(|| amdnr_pick(client, AMDNR_REPO).ok().map(|p| p.tag))
                 .flatten(),
             encore: net::latest_tag(client, ENCORE_REPO).ok(),
             // Same source order as the install: NVIDIA's tag, else the mirror's.
@@ -721,7 +721,25 @@ fn step_opti(
     let repo = opti_repo();
     // A pinned tag stands in for "latest": a build that regressed for a game
     // can be held at the one that worked (#104).
-    let latest = opti_pinned_tag().or_else(|| net::latest_tag(client, repo).ok());
+    let pick = if amdnr() && opti_pinned_tag().is_none() {
+        match amdnr_pick(client, repo) {
+            Ok(p) => Some(p),
+            // An install already there keeps working; a new one needs a release.
+            Err(_) if st.opti => {
+                patch_opti_ini(st, d)?;
+                return Ok(vec![
+                    "AMDNR present (no newer release this tool can install), settings applied"
+                        .to_owned(),
+                ]);
+            }
+            Err(e) => return Err(e),
+        }
+    } else {
+        None
+    };
+    let latest = opti_pinned_tag()
+        .or_else(|| pick.as_ref().map(|p| p.tag.clone()))
+        .or_else(|| net::latest_tag(client, repo).ok());
     if st.opti {
         // No manifest at all: somebody else put OptiScaler there. A manifest
         // without a "# tag" line is ours, from before the tag was recorded --
@@ -771,6 +789,7 @@ fn step_opti(
             .or_else(|_| net::github_asset_url_html(client, repo, tag, r#"[^"]+\.zip"#))
     };
     let asset: String = match latest.clone() {
+        _ if pick.is_some() => pick.as_ref().map(|p| p.main.clone()).unwrap_or_default(),
         Some(tag) => by_name(&tag)?,
         None if amdnr() => bail!("could not read {repo}'s newest release; try again in a minute"),
         None => match net::get_json_github(client, &opti_releases_url()) {
@@ -802,11 +821,17 @@ fn step_opti(
     // network never starts. Both are fetched and checked before a byte is
     // written into the game folder.
     let lmxxf_zip = if amdnr() && !zip_has_lmxxf(&zip_path)? {
-        let tag = latest.clone().ok_or_else(|| {
-            anyhow!("could not read {repo}'s newest release; try again in a minute")
-        })?;
-        let url = net::github_asset_url_html(client, repo, &tag, AMDNR_LMXXF_ASSET)
-            .context("this AMDNR release has no lmxxf runtime in its package or beside it")?;
+        let url = match pick.as_ref().and_then(|p| p.lmxxf.clone()) {
+            Some(u) => u,
+            None => {
+                let tag = latest.clone().ok_or_else(|| {
+                    anyhow!("could not read {repo}'s newest release; try again in a minute")
+                })?;
+                net::github_asset_url_html(client, repo, &tag, AMDNR_LMXXF_ASSET).context(
+                    "this AMDNR release has no lmxxf runtime in its package or beside it",
+                )?
+            }
+        };
         let path = work.join("amdnr-lmxxf.zip");
         net::download(
             client,
@@ -1133,13 +1158,72 @@ fn gears_tuning(ini: &str, d: &Path) -> Option<String> {
     changed.then_some(cur)
 }
 
+/// True when `names` lists both lmxxf runtime files at the top level.
+fn lmxxf_in(names: &[String]) -> bool {
+    AMDNR_LMXXF_FILES
+        .iter()
+        .all(|f| names.iter().any(|n| n.eq_ignore_ascii_case(f)))
+}
+
+/// An AMDNR release the tool can complete: its main package, and the lmxxf
+/// runtime zip when the main package does not carry the runtime itself.
+struct AmdnrPick {
+    tag: String,
+    main: String,
+    lmxxf: Option<String>,
+}
+
+/// The newest AMDNR release that has the lmxxf runtime, inside its main zip
+/// or as a companion zip. From 0.3.5.8R3 the project no longer publishes the
+/// runtime on GitHub (it carries NVIDIA weights), so that release installs
+/// an OptiScaler that cannot start the network; the previous one that does
+/// is used instead. Each release is checked by reading its zip's file list
+/// with Range requests, not by downloading it.
+fn amdnr_pick(client: &Client, repo: &str) -> Result<AmdnrPick> {
+    let mut tags = vec![net::latest_tag(client, repo)?];
+    if let Ok(more) = net::github_release_tags_html(client, repo, "Alpha", 1) {
+        for t in more {
+            if !tags.contains(&t) {
+                tags.push(t);
+            }
+        }
+    }
+    for tag in tags.into_iter().take(8) {
+        let Ok(main) = net::github_asset_url_html(client, repo, &tag, AMDNR_ASSET) else {
+            continue;
+        };
+        // A file list that cannot be read counts as "inside": the check after
+        // the download still stops a package without the runtime.
+        let inside = net::remote_zip_names(client, &main)
+            .map(|n| lmxxf_in(&n))
+            .unwrap_or(true);
+        if inside {
+            return Ok(AmdnrPick {
+                tag,
+                main,
+                lmxxf: None,
+            });
+        }
+        if let Ok(lmxxf) = net::github_asset_url_html(client, repo, &tag, AMDNR_LMXXF_ASSET) {
+            return Ok(AmdnrPick {
+                tag,
+                main,
+                lmxxf: Some(lmxxf),
+            });
+        }
+    }
+    bail!(
+        "no recent AMDNR release on GitHub carries the lmxxf runtime this tool needs \
+         (AMDNR 0.3.5.8R3 and later hand it out through AMDNR's own launcher only)"
+    )
+}
+
 /// True when the zip carries the lmxxf runtime files itself.
 fn zip_has_lmxxf(zip_path: &Path) -> Result<bool> {
     let zip = zip::ZipArchive::new(fs::File::open(zip_path)?)
         .context("OptiScaler download is not a valid zip")?;
-    Ok(AMDNR_LMXXF_FILES
-        .iter()
-        .all(|f| zip.file_names().any(|n| n.eq_ignore_ascii_case(f))))
+    let names: Vec<String> = zip.file_names().map(str::to_owned).collect();
+    Ok(lmxxf_in(&names))
 }
 
 /// Remove an OptiScaler install recorded in the manifest.
@@ -4875,6 +4959,23 @@ Dxgi=auto
         assert!(!missing_install_files(&st)
             .iter()
             .any(|m| m == game::DLSSNR_DLL));
+    }
+
+    /// A package counts as carrying the lmxxf runtime only with both files at
+    /// its top level (0.3.5.8R3's zip has neither).
+    #[test]
+    fn the_lmxxf_runtime_must_be_in_the_package_for_it_to_count() {
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(lmxxf_in(&names(&[
+            "OptiScaler.dll",
+            "LmxxfNrRuntime.dll",
+            "LmxxfNrRuntime.pak"
+        ])));
+        assert!(!lmxxf_in(&names(&["OptiScaler.dll", "LmxxfNrRuntime.dll"])));
+        assert!(!lmxxf_in(&names(&[
+            "OptiScaler.dll",
+            "Licenses/lmxxf_LICENSE.txt"
+        ])));
     }
 
     /// 0.3.5.8R1 moved the lmxxf runtime into its own zip; it is found by
