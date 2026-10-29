@@ -1006,6 +1006,16 @@ pub fn game_ships_dlss(game_dir: &Path) -> bool {
     if walk(&game_dir.join("Engine").join("Plugins"), 7) {
         return true;
     }
+    // Unreal game whose exe sits a few folders below the root that holds
+    // Engine\Plugins (Phantom Blade Zero: <root>\platform\steam\PBZ.exe).
+    if game_dir
+        .ancestors()
+        .skip(1)
+        .take(3)
+        .any(|a| walk(&a.join("Engine").join("Plugins"), 7))
+    {
+        return true;
+    }
     // Unreal: exe in <Project>/Binaries/Win64, DLSS in
     // <Project>/Plugins/NVIDIA/DLSS/Binaries/ThirdParty/Win64 (or Engine/Plugins/...).
     let unreal_root = game_dir
@@ -2854,6 +2864,21 @@ mod tests {
         assert_eq!(inspect(&exe).unwrap().mode, Mode::Feeder);
         // Streamline runtime alone is a DLSS signal
         fs::write(d.join("sl.interposer.dll"), b"x").unwrap();
+        assert_eq!(inspect(&exe).unwrap().mode, Mode::Native);
+    }
+
+    /// Phantom Blade Zero: the exe is at <root>\platform\steam, the game's
+    /// DLSS plugin at <root>\Engine\Plugins, two folders above it.
+    #[test]
+    fn dlss_in_an_engine_folder_above_the_exe_counts() {
+        let t = tempfile::tempdir().unwrap();
+        let exe_dir = t.path().join("platform").join("steam");
+        fs::create_dir_all(&exe_dir).unwrap();
+        let exe = make_pe(&exe_dir.join("game.exe"), PE_X64);
+        assert_eq!(inspect(&exe).unwrap().mode, Mode::Feeder);
+        let plug = t.path().join("Engine").join("Plugins").join("DLSS");
+        fs::create_dir_all(&plug).unwrap();
+        fs::write(plug.join(DLSS_DLL), b"x").unwrap();
         assert_eq!(inspect(&exe).unwrap().mode, Mode::Native);
     }
 
