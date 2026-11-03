@@ -707,12 +707,29 @@ fn step_opti(
     progress: Progress,
 ) -> Result<Vec<String>> {
     let d = st.game_dir();
-    if game::is_reshade_dll(&d.join(game::RESHADE_PROXY)) {
+    let proxy = game::opti_proxy_name(st.api);
+    let ours: Vec<String> = fs::read_to_string(d.join(game::OPTI_MANIFEST))
+        .map(|m| m.lines().map(|l| l.trim().to_owned()).collect())
+        .unwrap_or_default();
+    if proxy == game::RESHADE_PROXY && game::is_reshade_dll(&d.join(proxy)) {
         bail!(
             "ReShade is installed as dxgi.dll in this game; OptiScaler needs that name. \
              Run Remove (or Remove incl. ReShade) first, then install with the OptiScaler engine."
         );
     }
+    if proxy != game::RESHADE_PROXY
+        && d.join(proxy).is_file()
+        && !ours.iter().any(|l| l.eq_ignore_ascii_case(proxy))
+    {
+        bail!(
+            "{proxy} is already in this Vulkan game's folder and OptiScaler needs that name. \
+             Remove whatever put it there first, then install again."
+        );
+    }
+    // An OptiScaler this tool placed under another name (dxgi.dll, before a
+    // Vulkan game was told apart) is moved to the right one, not left as current.
+    let misnamed =
+        st.opti && !ours.is_empty() && !ours.iter().any(|l| l.eq_ignore_ascii_case(proxy));
     progress(0, "Looking up latest OptiScaler DLSS-NR release");
     // An installed OptiScaler used to be left alone forever, so a game set up
     // in August still ran August's build after every reinstall. The tag is
@@ -740,7 +757,7 @@ fn step_opti(
     let latest = opti_pinned_tag()
         .or_else(|| pick.as_ref().map(|p| p.tag.clone()))
         .or_else(|| net::latest_tag(client, repo).ok());
-    if st.opti {
+    if st.opti && !misnamed {
         // No manifest at all: somebody else put OptiScaler there. A manifest
         // without a "# tag" line is ours, from before the tag was recorded --
         // refresh it, which also writes the tag for next time.
@@ -904,7 +921,7 @@ fn step_opti(
             continue;
         }
         let out_rel = if fname.eq_ignore_ascii_case("OptiScaler.dll") {
-            game::RESHADE_PROXY.to_string() // dxgi.dll
+            proxy.to_string() // dxgi.dll, winmm.dll in a Vulkan game
         } else {
             parts.join("/")
         };
@@ -920,7 +937,7 @@ fn step_opti(
         net::extract_member(&mut zip, &member, &dest)?;
         installed.push(out_rel);
     }
-    if !installed.iter().any(|p| p == game::RESHADE_PROXY) {
+    if !installed.iter().any(|p| p == proxy) {
         bail!("the OptiScaler release had no OptiScaler.dll — layout changed upstream");
     }
     if let Some(path) = &lmxxf_zip {
@@ -6347,6 +6364,8 @@ RestoreComputeSignature=true
             Some("version.dll")
         );
         assert_eq!(game::rtxmfg_proxy_name(game::Api::Dx9), None);
+        assert_eq!(game::opti_proxy_name(game::Api::Dx12), "dxgi.dll");
+        assert_eq!(game::opti_proxy_name(game::Api::Vulkan), "winmm.dll");
 
         let t = tempfile::tempdir().unwrap();
         let d = t.path();

@@ -1974,6 +1974,17 @@ pub fn shaders_missing(game_dir: &Path) -> bool {
         && game_dir.join(RESHADE_PROXY).is_file()
 }
 
+/// The file name OptiScaler goes in as: `dxgi.dll` for DirectX, `winmm.dll` for
+/// a Vulkan game, which never loads a `dxgi.dll` from its own folder (#149;
+/// OptiScaler's wiki lists winmm.dll/version.dll for Vulkan-only titles).
+pub fn opti_proxy_name(api: Api) -> &'static str {
+    if api == Api::Vulkan {
+        "winmm.dll"
+    } else {
+        RESHADE_PROXY
+    }
+}
+
 /// The file name RTXMFG goes in as, by graphics API: a DirectX 11/12 game loads
 /// `dxgi.dll` from its folder; a Vulkan game does not, so `version.dll` there.
 /// `None` for the APIs RTXMFG does not cover (it needs Streamline frame
