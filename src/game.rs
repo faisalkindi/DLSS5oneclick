@@ -957,6 +957,10 @@ pub fn known_anticheat_exe(exe: &Path) -> Option<&'static str> {
         "robloxplayerbeta.exe" | "robloxplayerlauncher.exe" | "robloxstudiobeta.exe" => {
             Some("Roblox Hyperion anti-tamper")
         }
+        // Wardogs (Bulkhead) is online-only; its enforcement policy bans
+        // modifying the game's files or running tools that do, and its anti-cheat
+        // watches other programs. It ships no marker files (#151).
+        "wardogsclient-win64-shipping.exe" => Some("Wardogs anti-cheat"),
         _ => None,
     }
 }
@@ -2501,6 +2505,14 @@ mod tests {
             );
         }
         assert_eq!(known_anticheat_exe(Path::new("wowzers.exe")), None);
+    }
+
+    #[test]
+    fn wardogs_is_refused_by_exe_name() {
+        assert_eq!(
+            known_anticheat_exe(Path::new("WardogsClient-Win64-Shipping.exe")),
+            Some("Wardogs anti-cheat")
+        );
     }
 
     #[test]
