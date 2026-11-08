@@ -312,7 +312,11 @@ fn with_retry<T>(progress: Progress, label: &str, f: impl Fn() -> Result<T>) -> 
                     || msg.contains("corrupt message")
                     || msg.contains("connection")
                     || msg.contains("timed out")
-                    || msg.contains("reset");
+                    || msg.contains("reset")
+                    // github.com answers a request with 502/503/504 during a blip (#153)
+                    || msg.contains("HTTP 502")
+                    || msg.contains("HTTP 503")
+                    || msg.contains("HTTP 504");
                 if !retryable || attempt == 4 {
                     return Err(e);
                 }
@@ -610,6 +614,16 @@ mod tests {
         });
         assert!(r.is_err());
         assert_eq!(m.get(), 1);
+        let k = Cell::new(0);
+        let r: Result<u8> = with_retry(&|_, _| {}, "x", || {
+            k.set(k.get() + 1);
+            if k.get() < 2 {
+                bail!("https://github.com/x/y/releases?page=1: HTTP 503 Service Unavailable")
+            }
+            Ok(9)
+        });
+        assert_eq!(r.unwrap(), 9);
+        assert_eq!(k.get(), 2);
     }
 
     #[test]
