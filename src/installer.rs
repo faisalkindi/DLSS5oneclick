@@ -1198,14 +1198,16 @@ struct AmdnrPick {
 /// with Range requests, not by downloading it.
 fn amdnr_pick(client: &Client, repo: &str) -> Result<AmdnrPick> {
     let mut tags = vec![net::latest_tag(client, repo)?];
-    if let Ok(more) = net::github_release_tags_html(client, repo, "Alpha", 1) {
+    // Two release pages (20 tags): R3 to R17 ship without the runtime, so the one
+    // that has it (R2) is already 15 releases back, and every new release pushes it further.
+    if let Ok(more) = net::github_release_tags_html(client, repo, "Alpha", 3) {
         for t in more {
             if !tags.contains(&t) {
                 tags.push(t);
             }
         }
     }
-    for tag in tags.into_iter().take(8) {
+    for tag in tags.into_iter().take(24) {
         let Ok(main) = net::github_asset_url_html(client, repo, &tag, AMDNR_ASSET) else {
             continue;
         };
