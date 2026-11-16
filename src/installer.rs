@@ -301,6 +301,12 @@ pub enum Engine {
 
 const RTXMFG_REPO: &str = "dashdogy/MFG-Unlocker";
 
+/// MFG-Unlocker is pinned to v1.7.0 instead of the newest release: v1.7.1's
+/// `MFGUnlocker.dll` is flagged by Windows Defender (Trojan:Win32/Posilod.EB!cl,
+/// #159) and by 4 VirusTotal engines, v1.7.0's is 0/70. Move the pin once a
+/// later release scans clean.
+const RTXMFG_PINNED_TAG: &str = "v1.7.0";
+
 /// SilyNoMeta's RTX Encore: closed source, no licence of its own, MIT and BSD
 /// parts listed in its notices (which travel with the DLL). Downloaded from its
 /// release page and checked against the SHA-256 GitHub records; never hosted.
@@ -442,7 +448,7 @@ impl Latest {
                 .map(|(t, _)| t),
             mfg_len: net::remote_len(client, MFG_DOWNLOAD).ok().flatten(),
             bridge_len: net::remote_len(client, BRIDGE_DOWNLOAD).ok().flatten(),
-            rtxmfg: net::latest_tag(client, RTXMFG_REPO).ok(),
+            rtxmfg: Some(RTXMFG_PINNED_TAG.to_owned()),
         }
     }
 }
@@ -3206,7 +3212,7 @@ fn rtxmfg_install(
         );
     }
     progress(0, "Looking up Universal RTXMFG");
-    let tag = net::latest_tag(client, RTXMFG_REPO)?;
+    let tag = RTXMFG_PINNED_TAG.to_owned();
     if dest.is_file()
         && mine_proxy.as_deref() == Some(proxy)
         && mine
